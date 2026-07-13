@@ -1,0 +1,25 @@
+# 环境变量（含 API Key，绝不提交）
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+dist/
+build/
+*.egg
+
+# IDE
+.vscode/
+.idea/
+
+# Docker
+docker-data/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# 数据卷（运行时生成）
+data/vectors/

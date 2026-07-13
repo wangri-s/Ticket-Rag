@@ -1,0 +1,36 @@
+# ============================================================
+# RAG 智能工单系统 — 应用配置文件
+# 使用 ${ENV_VAR:-default} 语法，运行时自动读取环境变量
+# ============================================================
+
+milvus:
+  host: ${MILVUS_HOST:-localhost}
+  port: ${MILVUS_PORT:-19530}
+  collection_name: medical_chunks
+  vector_dim: 1536
+  index_type: IVF_FLAT
+  metric_type: IP
+  index_params:
+    nlist: 1024
+
+embedding:
+  model: text-embedding-v1
+  provider: dashscope
+  dashscope_api_key: ${DASHSCOPE_API_KEY}
+  batch_size: 32
+
+llm:
+  model: qwen-max
+  provider: dashscope
+  temperature: 0.1
+  max_tokens: 1500
+  dashscope_api_key: ${DASHSCOPE_API_KEY}
+
+retrieval:
+  top_k: 5
+  score_threshold: 0.0
+
+chunking:
+  chunk_size: 500
+  chunk_overlap: 50
+  min_chunk_length: 20
