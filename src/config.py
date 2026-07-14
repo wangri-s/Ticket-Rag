@@ -66,9 +66,13 @@ class MilvusConfig:
         self.port: int = int(data.get("port", 19530))
         self.collection_name: str = data["collection_name"]
         self.vector_dim: int = data["vector_dim"]
+        self.timeout: int = data.get("timeout", 30)
+        self.max_retries: int = data.get("max_retries", 3)
         self.index_type: str = data.get("index_type", "IVF_FLAT")
         self.metric_type: str = data.get("metric_type", "IP")
         self.index_params: dict = data.get("index_params", {})
+        self.search_params: dict = data.get("search_params", {"nprobe": 16})
+        self.consistency_level: str = data.get("consistency_level", "Strong")
 
     @property
     def uri(self) -> str:
@@ -80,7 +84,11 @@ class EmbeddingConfig:
         self.model: str = data["model"]
         self.provider: str = data.get("provider", "dashscope")
         self.dashscope_api_key: str = data["dashscope_api_key"]
+        self.dimensions: int = data.get("dimensions", 1536)
         self.batch_size: int = data.get("batch_size", 32)
+        self.max_retries: int = data.get("max_retries", 3)
+        self.timeout: int = data.get("timeout", 60)
+        self.sleep_interval: float = data.get("sleep_interval", 1.0)
 
 
 class LLMConfig:

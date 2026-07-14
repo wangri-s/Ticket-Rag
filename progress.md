@@ -150,3 +150,57 @@
   - `tests/test_pipeline.py` — 5 个测试：目录/单文件摄入、stats 统计、空目录、分组
   - 使用 `pytest`，**37 tests passed, 0 failed**
 - **状态**：✅ 完成
+
+## 步骤 15：完善 config.yml Milvus + Embedding 配置
+- **时间**：2026-07-14
+- **操作**：扩展 `config.yml` 和 `src/config.py` 中 Milvus 和 Embedding 配置段：
+  - **Milvus 新增** — `timeout`（30s）、`max_retries`（3次）、`search_params.nprobe`（16，搜索探测聚类数）、`consistency_level`（Strong，强一致性读）
+  - **Embedding 新增** — `dimensions`（1536，与向量维度校验）、`max_retries`（3次）、`timeout`（60s）、`sleep_interval`（1s，批量间冷却防限流）
+- **状态**：✅ 完成
+
+## 步骤 16：修复 chunker 工单编号继承
+- **时间**：2026-07-14
+- **操作**：修复 `split_documents()` 中工单编号丢失问题：
+  - **问题**：一张工单被切成 2-3 块时，只有包含 `【工单编号】` 的块能提取到 ticket_id，后续块（处理方案/结果）丢失编号，被归入 `__unmatched__`
+  - **修复**：引入 `last_ticket_id` 变量，顺序遍历分块时记住最近一次提取到的编号，当前块提取不到则继承
+  - **效果**：`__unmatched__` 从 12 块降至 1 块（仅文档标题），10 张工单每张正确关联 2-3 块
+- **状态**：✅ 完成
+
+## 步骤 17：创建 Embedding 客户端
+- **时间**：2026-07-14
+- **操作**：创建 `src/embedding/embedding_client.py`，`EmbeddingClient` 类：
+  - `embed(text)` — 单条文本 → 1536 维向量
+  - `embed_batch(texts)` — 批量向量化，自动按 `batch_size` 分批，批次间 `sleep_interval` 防限流
+  - `_call_with_retry()` — 失败自动重试（max_retries=3），指数退避
+  - `_validate_dim()` — 校验输出维度与配置一致
+  - **实测验证**：`embed("CT扫描过程中偶发图像伪影")` → 1536 维向量，API 调用成功
+- **状态**：✅ 完成
+
+## 步骤 18：创建 Milvus 操作客户端
+- **时间**：2026-07-15
+- **操作**：创建 `src/retrieval/milvus_client.py`，`MilvusStore` 类：
+  - 基于新版 `pymilvus.MilvusClient`（非 ORM 风格，避免 PyMilvus 3.1 弃用）
+  - `create_collection()` — 创建 collection，6 字段 schema（id/content/embedding/ticket_id/source/chunk_index），自动建 IVF_FLAT 索引
+  - `insert()` — 批量写入向量+元数据，自动 flush 持久化
+  - `search()` — 语义搜索，返回 top_k 结果含 id/score/content/ticket_id，支持标量过滤
+  - `collection_exists()` / `num_entities` / `drop_collection()` — 工具方法
+  - 同步修复：`.env` 中 `MILVUS_HOST` 改为 `localhost`（本机开发），`docker-compose.yml` 中 `environment` 覆盖为 `milvus-standalone`（容器内 DNS）
+- **状态**：✅ 完成
+
+## 步骤 19：创建 ETL 构建脚本 + Milvus 测试验证
+- **时间**：2026-07-15
+- **操作**：
+  - 创建 `build_milvus.py` — 端到端知识库构建脚本，串联全部已开发模块：
+    - `[1/4]` 文档加载（DocumentLoader）
+    - `[2/4]` 文本分块（MedicalWorkOrderChunker）
+    - `[3/4]` 批量向量化（EmbeddingClient，自动分批+限流）
+    - `[4/4]` 写入 Milvus（MilvusStore，首次建库/增量追加）
+    - 支持 `--rebuild`（删库重建）、`--dry-run`（只分块预览）、`--source`（指定文档目录）
+    - **实测**：工单知识库 1 文档 → 22 块 → 22 条向量 → Milvus 存储，总耗时 5.2s
+  - 创建 `tests/test_milvus_manual.py` — 6 个 pytest 用例验证 Milvus 连接、增删查、标量过滤
+    - **实测**：6 passed, 0 failed
+  - **修复 `milvus_client.py` 3 个 API 兼容问题**：
+    - dict schema → `FieldSchema` + `CollectionSchema` 对象（新版 pymilvus 拒绝 dict）
+    - `create_index(params=...)` → `IndexParams().add_index(...)`（参数接口变更）
+    - `insert()` 后加 `flush()` 持久化 + `create_collection()` 后加 `load_collection()` 加载到内存
+- **状态**：✅ 完成

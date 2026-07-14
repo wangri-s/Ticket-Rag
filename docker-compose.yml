@@ -75,6 +75,8 @@ services:
       dockerfile: Dockerfile
     env_file:
       - .env
+    environment:
+      - MILVUS_HOST=milvus-standalone  # 容器内走 Docker DNS
     ports:
       - "8000:8000"
     volumes:

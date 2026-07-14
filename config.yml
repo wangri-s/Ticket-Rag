@@ -8,16 +8,33 @@ milvus:
   port: ${MILVUS_PORT:-19530}
   collection_name: medical_chunks
   vector_dim: 1536
-  index_type: IVF_FLAT
-  metric_type: IP
+
+  # ---------- 连接 ----------
+  timeout: 30                   # 连接超时（秒）
+  max_retries: 3                # 失败重试次数
+
+  # ---------- 索引 ----------
+  index_type: IVF_FLAT          # 倒排索引 + 平坦量化
+  metric_type: IP               # 内积相似度（适合 text-embedding-v1 归一化向量）
   index_params:
-    nlist: 1024
+    nlist: 1024                 # 聚类数 ≈ sqrt(总向量数) × 4
+
+  # ---------- 搜索 ----------
+  search_params:
+    nprobe: 16                  # 搜索时探测的聚类数，越大精度越高速度越慢
+  consistency_level: "Strong"   # Strong | Bounded | Session | Eventually
 
 embedding:
   model: text-embedding-v1
   provider: dashscope
   dashscope_api_key: ${DASHSCOPE_API_KEY}
-  batch_size: 32
+  dimensions: 1536              # 输出向量维度（与 milvus.vector_dim 一致）
+  batch_size: 32                # 每批处理文本数
+
+  # ---------- API 调用控制 ----------
+  max_retries: 3                # 失败重试
+  timeout: 60                   # 请求超时（秒）
+  sleep_interval: 1             # 批量调用间隔（秒），避免触发限流
 
 llm:
   model: qwen-max

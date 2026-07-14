@@ -68,7 +68,9 @@ class MedicalWorkOrderChunker:
 
         每个子块继承父文档的 metadata，并自动追加:
           - chunk_index:  块序号
-          - ticket_id:    所属工单编号（从文本中正则提取）
+          - ticket_id:    所属工单编号
+            · 先从当前块文本提取
+            · 提取不到则继承上一个块的 ticket_id（同一工单的后续分块）
         """
         if not documents:
             return []
@@ -76,14 +78,21 @@ class MedicalWorkOrderChunker:
         split_docs = self._splitter.split_documents(documents)
 
         enriched: list[Document] = []
+        last_ticket_id: str | None = None
+
         for i, doc in enumerate(split_docs):
             if len(doc.page_content) < self.min_chunk_length:
                 continue
 
             doc.metadata["chunk_index"] = i
+
             tid = extract_ticket_id(doc.page_content)
             if tid:
                 doc.metadata["ticket_id"] = tid
+                last_ticket_id = tid
+            elif last_ticket_id:
+                # 当前块不包含工单编号 → 继承上一个块的编号
+                doc.metadata["ticket_id"] = last_ticket_id
 
             enriched.append(doc)
 
