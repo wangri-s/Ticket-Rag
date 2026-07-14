@@ -100,9 +100,11 @@ class RetrievalConfig:
 
 class ChunkingConfig:
     def __init__(self, data: dict):
+        self.strategy: str = data.get("strategy", "recursive")
         self.chunk_size: int = data["chunk_size"]
         self.chunk_overlap: int = data["chunk_overlap"]
         self.min_chunk_length: int = data["min_chunk_length"]
+        self.separators: list[str] = data.get("separators", ["\n\n", "\n", "。", " "])
 
 
 class AppConfig:

@@ -31,6 +31,20 @@ retrieval:
   score_threshold: 0.0
 
 chunking:
-  chunk_size: 500
-  chunk_overlap: 50
-  min_chunk_length: 20
+  # ---------- 分块策略 ----------
+  strategy: recursive           # recursive | semantic | fixed
+  chunk_size: 500               # 每块最大字符数
+  chunk_overlap: 50             # 相邻块重叠字符数
+  min_chunk_length: 20          # 丢弃短于此值的块
+
+  # ---------- 分隔符（按优先级从高到低） ----------
+  separators:
+    - "\n════"                  # 工单之间分隔线
+    - "\n────────────────"     # 工单内部分隔线
+    - "\n【"                    # 字段标签（故障现象、处理方案等）
+    - "\nStep"                  # 排查/处理步骤
+    - "\n\n"                    # 双换行（段落边界）
+    - "\n"                      # 单换行
+    - "。"                      # 中文句号
+    - "；"                      # 中文分号
+    - " "                       # 空格（最后兜底）

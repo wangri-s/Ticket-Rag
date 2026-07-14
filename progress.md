@@ -96,11 +96,57 @@
   - 故障类型多样化：硬件老化、传感器漂移、网络故障、软件性能、耗材更换
 - **状态**：✅ 完成
 
-## 步骤 10：推送到远程 Git 仓库
-- **时间**：2026-07-13
+## 步骤 10：完善 config.yml chunking 配置
+- **时间**：2026-07-14
+- **操作**：细化 `config.yml` 中 `chunking` 配置，为文档分块做准备：
+  - 新增 `strategy: recursive` — 递归字符分割策略
+  - 新增 `separators` — 7 级分隔符优先级（工单分隔线 → 字段标签 → 步骤 → 段落 → 句子）
+  - 同步更新 `src/config.py` 中 `ChunkingConfig` 类，新增 `strategy`、`separators` 两个字段
+  - 后续：去掉 `encoding`，改用纯字符计数分块（500 中文字符远在 text-embedding-v1 的 2048 token 限制内）
+- **状态**：✅ 完成
+
+## 步骤 11：创建文本分割器 chunker.py
+- **时间**：2026-07-14
+- **操作**：创建 `src/ingestion/chunker.py`，`MedicalWorkOrderChunker` 类：
+  - 基于 `RecursiveCharacterTextSplitter`，使用 config.yml 中 7 级分隔符递归分块
+  - `length_function=len` 纯字符计数，不依赖 token 编码器
+  - `keep_separator=True` 保留分隔符，提升检索上下文可读性
+  - `split_text()` — 纯文本分块，自动过滤短于 `min_chunk_length` 的碎片
+  - `split_documents()` — LangChain Document 对象分块，继承 metadata 并追加 `chunk_index`
+  - 重构：`split_text_with_overlap_control()` 替换为 `split_with_stats()`，返回 chunks + count + avg/min/max 尺寸 + ticket_ids
+  - 新增 `extract_ticket_id()` 函数，正则匹配工单编号（GD-YYYY-MMDDD），自动注入每个块的 metadata
+  - 新增 `group_by_ticket()` 方法，将分块结果按工单编号分组，支持检索结果溯源
+  - `split_documents()` 现在自动为每块追加 `ticket_id` 到 metadata
+- **状态**：✅ 完成（重构）
+
+## 步骤 12：创建文档加载器 + 摄入流水线
+- **时间**：2026-07-14
 - **操作**：
-  - 创建 `.gitignore`，排除 `.env`（含 API Key）、`__pycache__`、`data/vectors/`、IDE 配置
-  - `git commit` 提交 20 个文件（725 行新增）
-  - `git push -u origin master` 推送到 `https://github.com/wangri-s/Ticket-Rag.git`
-  - `.env` 文件未被推送，API Key 安全
+  - 创建 `src/ingestion/loader.py` — `DocumentLoader` 统一加载器：
+    - `load()` 单文件加载，根据后缀自动选策略（TXT → TextLoader / PDF → PyPDFLoader / MD → 按文本）
+    - `load_directory()` 批量加载目录，递归扫描，自动跳过非文档文件
+    - 每个文档携带 `file_type`、`source` 等 metadata
+  - 创建 `src/ingestion/pipeline.py` — `IngestionPipeline` 摄入流水线：
+    - `run(source)` 编排完整流程：加载 → 分块 → 统计输出
+    - `run_with_stats(source)` 返回结构化统计数据（total_chunks、ticket_ids、avg/min/max）
+    - `group_by_ticket()` 按工单编号分组，支持溯源
+    - **实测验证**：工单知识库 → 1 文档 7118 字符 → 22 块，avg=322 字符/块，max=487（未超 500），覆盖全部 10 张工单
+- **状态**：✅ 完成
+
+## 步骤 13：创建命令行工具 cli.py
+- **时间**：2026-07-14
+- **操作**：创建 `src/cli.py`，三个子命令：
+  - `ingest -s <路径>` — 摄入文档（加载+分块+统计），支持 `--json` 供脚本调用
+  - `chunk-preview -f <文件> -n <数量>` — 预览分块效果，显示每块内容+工单编号+字符数
+  - `stats` — 显示系统配置摘要，校验必填环境变量
+- **状态**：✅ 完成
+
+## 步骤 14：创建测试文件
+- **时间**：2026-07-14
+- **操作**：创建 4 个测试文件，覆盖已完成的全部模块：
+  - `tests/test_config.py` — 9 个测试：环境变量解析（含 .env 覆盖）、配置加载、单例、必填校验
+  - `tests/test_chunker.py` — 14 个测试：工单编号提取、分块/过滤/分隔符优先级、元数据继承、统计、分组
+  - `tests/test_loader.py` — 6 个测试：TXT 加载、文件不存在/格式不支持错误、目录加载、元数据
+  - `tests/test_pipeline.py` — 5 个测试：目录/单文件摄入、stats 统计、空目录、分组
+  - 使用 `pytest`，**37 tests passed, 0 failed**
 - **状态**：✅ 完成
