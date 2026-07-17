@@ -98,12 +98,29 @@ class LLMConfig:
         self.temperature: float = data["temperature"]
         self.max_tokens: int = data["max_tokens"]
         self.dashscope_api_key: str = data["dashscope_api_key"]
+        # 生成控制
+        self.top_p: float = data.get("top_p", 0.8)
+        self.seed: int = data.get("seed", 42)
+        self.stream: bool = data.get("stream", False)
+        # 连接
+        self.max_retries: int = data.get("max_retries", 3)
+        self.timeout: int = data.get("timeout", 60)
+        # RAG
+        self.retrieval_top_k: int = data.get("retrieval_top_k", 5)
+        self.system_prompt: str = data.get("system_prompt", "")
+        self.rag_prompt_template: str = data.get("rag_prompt_template", "")
+        self.fallback_answer: str = data.get("fallback_answer", "抱歉，未找到相关记录。")
 
 
 class RetrievalConfig:
     def __init__(self, data: dict):
         self.top_k: int = data["top_k"]
-        self.score_threshold: float = data["score_threshold"]
+        self.score_threshold: float = data.get("score_threshold", 0.0)
+        self.default_mode: str = data.get("default_mode", "hybrid")
+        # 混合检索权重
+        hybrid = data.get("hybrid", {})
+        self.hybrid_dense_weight: float = hybrid.get("dense_weight", 0.5)
+        self.hybrid_sparse_weight: float = hybrid.get("sparse_weight", 0.5)
 
 
 class ChunkingConfig:

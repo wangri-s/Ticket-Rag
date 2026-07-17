@@ -109,6 +109,160 @@ def cmd_stats(args):
     print()
 
 
+# ── RAG 问答 ──────────────────────────────────
+
+HELP_ASK = """
+  命令:
+    <问题>      直接输入问题进行问答
+    mode <m>    切换检索模式: semantic / keyword / hybrid
+    topk <n>    设置检索条数 (1-20)
+    filter <id> 按工单号过滤
+    clear       清除过滤条件
+    help        显示此帮助
+    stats       显示当前设置
+    quit/exit   退出交互模式
+"""
+
+
+def cmd_ask(args):
+    """RAG 问答：检索 + LLM 生成"""
+    from src.llm.rag_chain import RAGChain
+
+    # 命令行模式（-q 指定问题）
+    if args.question:
+        chain = RAGChain()
+        result = chain.ask(
+            question=args.question,
+            mode=args.mode,
+            top_k=args.top_k,
+            ticket_id_filter=args.ticket_id,
+        )
+        _print_result(result, args.mode)
+        return
+
+    # ── 交互模式 ──
+    print()
+    print("=" * 56)
+    print("  RAG 智能工单问答系统  v1.0")
+    print("  Powered by Milvus + Qwen-Max")
+    print("=" * 56)
+
+    print()
+    print("  正在初始化组件...")
+    from src.config import get_config
+    chain = RAGChain()
+    cfg = get_config()
+    print(f"  [OK] Embedding: {cfg.embedding.model} | "
+          f"Milvus: {cfg.milvus.uri} | LLM: {cfg.llm.model}")
+    print(f"  [OK] 全部组件就绪")
+
+    print(HELP_ASK)
+    print(f"  当前模式: {args.mode}")
+
+    # 交互状态（可变，支持运行时切换）
+    mode = args.mode
+    top_k = args.top_k
+    ticket_id = args.ticket_id
+
+    while True:
+        try:
+            mode_label = f"[{mode}]" if not ticket_id else f"[{mode} @{ticket_id}]"
+            question = input(f"\n  {mode_label}> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\n  再见！")
+            break
+
+        if not question:
+            continue
+
+        # 内置命令
+        cmd = question.lower()
+        if cmd in ("quit", "exit", "q"):
+            print("  再见！")
+            break
+        if cmd == "help":
+            print(HELP_ASK)
+            continue
+        if cmd == "stats":
+            _print_stats(mode, top_k, ticket_id)
+            continue
+        if cmd == "clear":
+            ticket_id = None
+            print("  已清除过滤条件")
+            continue
+        if cmd.startswith("mode "):
+            new = cmd.split()[1]
+            if new in ("semantic", "keyword", "hybrid"):
+                mode = new
+                print(f"  检索模式 → {mode}")
+            else:
+                print(f"  无效模式: {new}")
+            continue
+        if cmd.startswith("topk "):
+            try:
+                n = int(cmd.split()[1])
+                if 1 <= n <= 20:
+                    top_k = n
+                    print(f"  检索条数 → {top_k}")
+                else:
+                    print("  请输入 1-20")
+            except (IndexError, ValueError):
+                print("  用法: topk <数字>")
+            continue
+        if cmd.startswith("filter "):
+            ticket_id = cmd.split(None, 1)[1].strip()
+            print(f"  工单过滤 → {ticket_id}")
+            continue
+
+        # RAG 问答
+        try:
+            result = chain.ask(
+                question=question, mode=mode,
+                top_k=top_k, ticket_id_filter=ticket_id,
+            )
+            _print_result(result, mode)
+        except Exception as e:
+            print(f"\n  [ERROR] {e}\n  请重试或输入 quit 退出")
+
+
+def _print_result(result: dict, mode: str):
+    """打印回答 + 引用来源"""
+    print()
+    print("─" * 56)
+    print("  【回答】")
+    print("─" * 56)
+    print(result["answer"])
+    print()
+
+    sources = result.get("sources", [])
+    if sources:
+        print("─" * 56)
+        print(f"  【引用来源】共 {len(sources)} 条  |  mode={mode}")
+        print("─" * 56)
+        for i, s in enumerate(sources, 1):
+            tid = s.get("ticket_id", "?")
+            score = s.get("score", 0.0)
+            content = s.get("content", "")[:100].replace("\n", " ")
+            print(f"  [{i}] {tid}  (score={score:.4f})")
+            print(f"      {content}...")
+            print()
+    else:
+        print("  [注意] 本次回答未引用知识库工单")
+
+
+def _print_stats(mode: str, top_k: int, ticket_id: str):
+    """显示当前交互状态"""
+    cfg = get_config()
+    print(f"""
+  当前设置:
+    检索模式:   {mode}
+    检索条数:   {top_k or cfg.retrieval.top_k}
+    工单过滤:   {ticket_id or '无'}
+    LLM 模型:   {cfg.llm.model}
+    LLM 温度:   {cfg.llm.temperature}
+""")
+
+
 # ── CLI 入口 ──────────────────────────────────────
 
 def main():
@@ -121,6 +275,8 @@ def main():
   python -m src.cli ingest -s data/documents --json  # JSON 输出
   python -m src.cli chunk-preview -f data/documents/工单知识库.txt -n 5
   python -m src.cli stats                            # 查看配置
+  python -m src.cli ask -q "CT伪影怎么处理？"          # RAG 问答
+  python -m src.cli ask                               # 交互式问答
         """,
     )
 
@@ -143,6 +299,18 @@ def main():
     # stats
     sub.add_parser("stats", help="显示系统配置摘要")
 
+    # ask
+    p_ask = sub.add_parser("ask", help="RAG 智能问答（检索 + LLM 生成）")
+    p_ask.add_argument("-q", "--question", default=None,
+                        help="用户问题（不填则进入交互模式）")
+    p_ask.add_argument("-m", "--mode", default="hybrid",
+                        choices=["semantic", "keyword", "hybrid"],
+                        help="检索模式 (默认: hybrid)")
+    p_ask.add_argument("-k", "--top-k", type=int, default=None,
+                        help="检索条数 (默认取 config.yml)")
+    p_ask.add_argument("--ticket-id", default=None,
+                        help="按工单号过滤")
+
     args = parser.parse_args()
 
     if args.command == "ingest":
@@ -151,6 +319,8 @@ def main():
         cmd_chunk_preview(args)
     elif args.command == "stats":
         cmd_stats(args)
+    elif args.command == "ask":
+        cmd_ask(args)
     else:
         parser.print_help()
 

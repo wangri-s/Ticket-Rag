@@ -4,11 +4,15 @@ RAG 智能工单系统 — FastAPI 应用入口
 
 from fastapi import FastAPI
 
+from src.api.search import router as search_router
+
 app = FastAPI(
     title="智能工单 RAG 系统",
     description="基于 Milvus + Qwen-Max 的医疗设备运维工单检索增强生成系统",
     version="0.1.0",
 )
+
+app.include_router(search_router)
 
 
 @app.get("/health")
@@ -19,4 +23,12 @@ async def health_check():
 
 @app.get("/")
 async def root():
-    return {"message": "智能工单 RAG 系统已启动", "docs": "/docs"}
+    return {
+        "message": "智能工单 RAG 系统已启动",
+        "endpoints": {
+            "semantic": "POST /api/search/semantic",
+            "keyword": "POST /api/search/keyword",
+            "hybrid": "POST /api/search/hybrid",
+        },
+        "docs": "/docs",
+    }

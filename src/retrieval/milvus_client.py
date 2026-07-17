@@ -30,7 +30,8 @@ def _build_schema(dim: int) -> CollectionSchema:
     fields = [
         FieldSchema(name="id", dtype=DataType.INT64, is_primary=True, auto_id=True, description="主键（自增）"),
         FieldSchema(name="content", dtype=DataType.VARCHAR, max_length=2000, description="文本块内容"),
-        FieldSchema(name="embedding", dtype=DataType.FLOAT_VECTOR, dim=dim, description="文本嵌入向量"),
+        FieldSchema(name="embedding", dtype=DataType.FLOAT_VECTOR, dim=dim, description="稠密向量（语义）"),
+        FieldSchema(name="sparse_embedding", dtype=DataType.SPARSE_FLOAT_VECTOR, description="稀疏向量（BM25 关键字）"),
         FieldSchema(name="ticket_id", dtype=DataType.VARCHAR, max_length=32, description="工单编号"),
         FieldSchema(name="source", dtype=DataType.VARCHAR, max_length=512, description="来源文件"),
         FieldSchema(name="chunk_index", dtype=DataType.INT64, description="块序号"),
@@ -102,7 +103,7 @@ class MilvusStore:
             schema=schema,
         )
 
-        # 创建索引
+        # 创建稠密索引 (IVF_FLAT)
         index_params = IndexParams()
         index_params.add_index(
             field_name="embedding",
@@ -113,6 +114,18 @@ class MilvusStore:
         self._client.create_index(
             collection_name=self.collection_name,
             index_params=index_params,
+        )
+
+        # 创建稀疏索引 (SPARSE_INVERTED_INDEX)
+        sparse_index_params = IndexParams()
+        sparse_index_params.add_index(
+            field_name="sparse_embedding",
+            index_type="SPARSE_INVERTED_INDEX",
+            metric_type="IP",
+        )
+        self._client.create_index(
+            collection_name=self.collection_name,
+            index_params=sparse_index_params,
         )
 
         # 加载到内存，否则无法搜索
@@ -132,9 +145,13 @@ class MilvusStore:
         ticket_ids: list[str],
         sources: list[str],
         chunk_indices: list[int],
+        sparse_vectors: list[dict] = None,
     ) -> int:
         """
         批量写入向量 + 元数据。
+
+        参数:
+          sparse_vectors: 可选，BM25 稀疏向量列表 [{int(dim): float(val)}, ...]
 
         返回: 插入的行数
         """
@@ -146,13 +163,16 @@ class MilvusStore:
         # 构建 data 列表: [{"field": value}, ...]
         data = []
         for i in range(n):
-            data.append({
+            row = {
                 "content": contents[i],
                 "embedding": vectors[i],
                 "ticket_id": ticket_ids[i],
                 "source": sources[i],
                 "chunk_index": int(chunk_indices[i]),
-            })
+            }
+            if sparse_vectors and i < len(sparse_vectors):
+                row["sparse_embedding"] = sparse_vectors[i]
+            data.append(row)
 
         result = self._client.insert(
             collection_name=self.collection_name,
@@ -197,6 +217,121 @@ class MilvusStore:
         )
 
         # results 格式: [[{id, distance, entity: {...}}, ...]]
+        hits = []
+        for batch in results:
+            for hit in batch:
+                entity = hit.get("entity", {})
+                hits.append({
+                    "id": hit["id"],
+                    "score": hit["distance"],
+                    "content": entity.get("content", ""),
+                    "ticket_id": entity.get("ticket_id", ""),
+                    "source": entity.get("source", ""),
+                    "chunk_index": entity.get("chunk_index", -1),
+                })
+
+        return hits
+
+    # ── 稀疏向量检索（关键字）───────────────
+
+    def sparse_search(
+        self,
+        query_sparse_vector: dict,
+        top_k: int = 5,
+        expr: Optional[str] = None,
+    ) -> list[dict]:
+        """
+        关键字检索：输入 BM25 稀疏向量，返回匹配结果。
+
+        参数:
+          query_sparse_vector: BM25 编码后的查询稀疏向量 {int(dim): float(val)}
+          top_k:               返回条数
+          expr:                标量过滤表达式
+
+        返回:
+          [{id, score, content, ticket_id, source, chunk_index}, ...]
+        """
+        results = self._client.search(
+            collection_name=self.collection_name,
+            data=[query_sparse_vector],
+            anns_field="sparse_embedding",
+            limit=top_k,
+            filter=expr or "",
+            output_fields=["content", "ticket_id", "source", "chunk_index"],
+            search_params={"metric_type": "IP"},
+        )
+
+        hits = []
+        for batch in results:
+            for hit in batch:
+                entity = hit.get("entity", {})
+                hits.append({
+                    "id": hit["id"],
+                    "score": hit["distance"],
+                    "content": entity.get("content", ""),
+                    "ticket_id": entity.get("ticket_id", ""),
+                    "source": entity.get("source", ""),
+                    "chunk_index": entity.get("chunk_index", -1),
+                })
+
+        return hits
+
+    # ── 混合检索（语义 + 关键字）─────────────
+
+    def hybrid_search(
+        self,
+        query_vector: list[float],
+        query_sparse_vector: dict,
+        top_k: int = 5,
+        dense_weight: float = 0.5,
+        sparse_weight: float = 0.5,
+        expr: Optional[str] = None,
+    ) -> list[dict]:
+        """
+        混合检索：语义向量 + 关键字稀疏向量 加权重排。
+
+        参数:
+          query_vector:        稠密查询向量 (1536 维)
+          query_sparse_vector: BM25 稀疏查询向量 {int(dim): float(val)}
+          top_k:               返回条数
+          dense_weight:        语义权重（0~1）
+          sparse_weight:       关键字权重（0~1）
+          expr:                标量过滤表达式
+
+        返回:
+          [{id, score, content, ticket_id, source, chunk_index}, ...]
+        """
+        from pymilvus import AnnSearchRequest, WeightedRanker
+
+        # 稠密检索请求
+        dense_req = AnnSearchRequest(
+            data=[query_vector],
+            anns_field="embedding",
+            param={"metric_type": self.metric_type, "params": self.search_params},
+            limit=top_k * 2,
+            expr=expr or "",
+        )
+
+        # 稀疏检索请求
+        sparse_req = AnnSearchRequest(
+            data=[query_sparse_vector],
+            anns_field="sparse_embedding",
+            param={"metric_type": "IP"},
+            limit=top_k * 2,
+            expr=expr or "",
+        )
+
+        # 加权重排
+        ranker = WeightedRanker(dense_weight, sparse_weight)
+
+        results = self._client.hybrid_search(
+            collection_name=self.collection_name,
+            reqs=[dense_req, sparse_req],
+            ranker=ranker,
+            limit=top_k,
+            output_fields=["content", "ticket_id", "source", "chunk_index"],
+        )
+
         hits = []
         for batch in results:
             for hit in batch:

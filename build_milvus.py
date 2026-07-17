@@ -22,6 +22,7 @@ from src.config import get_config
 from src.ingestion.loader import DocumentLoader
 from src.ingestion.chunker import MedicalWorkOrderChunker
 from src.embedding.embedding_client import EmbeddingClient
+from src.embedding.sparse_embedder import BM25SparseEmbedder
 from src.retrieval.milvus_client import MilvusStore
 
 logging.basicConfig(
@@ -60,7 +61,7 @@ def build_knowledge_base(
 
     # ── 1. 加载文档 ──────────────────────────
     print("\n" + "=" * 56)
-    print("  [1/4] 加载文档")
+    print("  [1/5] 加载文档")
     print("=" * 56)
 
     loader = DocumentLoader()
@@ -78,7 +79,7 @@ def build_knowledge_base(
 
     # ── 2. 分块 ──────────────────────────────
     print("\n" + "=" * 56)
-    print("  [2/4] 文本分块")
+    print("  [2/5] 文本分块")
     print("=" * 56)
 
     chunker = MedicalWorkOrderChunker()
@@ -111,22 +112,34 @@ def build_knowledge_base(
             "elapsed_seconds": elapsed,
         }
 
-    # ── 3. 向量化 ────────────────────────────
+    contents = [c.page_content for c in chunks]
+
+    # ── 3. BM25 稀疏向量 ─────────────────────
     print("\n" + "=" * 56)
-    print("  [3/4] 向量化 (DashScope text-embedding-v1)")
+    print("  [3/5] BM25 稀疏向量（关键字检索）")
+    print("=" * 56)
+
+    sparse_embedder = BM25SparseEmbedder()
+    sparse_embedder.fit(contents)
+    sparse_vectors = sparse_embedder.encode_documents(contents)
+    print(f"  [OK] BM25 训练+编码完成: {len(sparse_vectors)} 个稀疏向量")
+
+    # ── 4. 稠密向量化 ────────────────────────
+    print("\n" + "=" * 56)
+    print("  [4/5] 稠密向量化 (DashScope text-embedding-v1)")
     print("=" * 56)
 
     emb = EmbeddingClient()
-    contents = [c.page_content for c in chunks]
+    # contents already extracted above
     batch_size = cfg.embedding.batch_size
 
     all_vectors = emb.embed_batch(contents)  # 内部自动分批 + 限流
 
     print(f"  [OK] 向量化完成: {len(all_vectors)} 条, 维度={len(all_vectors[0]) if all_vectors else 'N/A'}")
 
-    # ── 4. 写入 Milvus ───────────────────────
+    # ── 5. 写入 Milvus ───────────────────────
     print("\n" + "=" * 56)
-    print("  [4/4] 写入 Milvus")
+    print("  [5/5] 写入 Milvus")
     print("=" * 56)
 
     store = MilvusStore()
@@ -152,6 +165,7 @@ def build_knowledge_base(
         ticket_ids=ticket_ids_list,
         sources=sources_list,
         chunk_indices=chunk_indices_list,
+        sparse_vectors=sparse_vectors,
     )
 
     elapsed = time.time() - t0
