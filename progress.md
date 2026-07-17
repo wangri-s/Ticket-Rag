@@ -387,3 +387,17 @@
   - 删除 `src/interactive.py`（不再需要单独文件）
   - `python -m src.cli ask` 入口统一
 - **状态**：✅ 完成
+
+## 步骤 33：修复 test_rag.py — 补断言 + 加边界测试
+- **时间**：2026-07-18
+- **操作**：审查并修复 `tests/test_rag.py`，共 6 处改动：
+  - **修复 1** — `test_no_result_fallback`（原 174-183 行）：补上 3 个 assert（has_answer=False、sources=[]、兜底文本含"未找到"），原来只打印不校验
+  - **修复 2** — `test_keyword_matches_ticket`（原 114-122 行）：补上 assert 验证 GD-2026-03006 在结果中，原来只打印 ticket_ids
+  - **修复 3** — `test_ticket_filter`（原 157-168 行）：if 条件断言改为先 assert sources 非空再遍历，防止无结果时静默通过
+  - **修复 4** — `test_hybrid_scores_descending`（原 141-151 行）：加 has_answer=True 断言，防止无结果时降序检查无意义
+  - **修复 5** — 新增 `TestRAGEdgeCasesMore` 类：
+    - `test_empty_question_no_crash` — 空字符串问题不崩溃
+    - `test_invalid_mode_falls_back_to_hybrid` — 无效模式静默降级 hybrid
+  - **修复 6** — 测试编号从 12 个扩展到 14 个，修正重复编号
+  - **修复 7** — `src/cli.py` `_print_stats()` 函数缺少 `from src.config import get_config` 导入，补上局部导入（与其他函数 `cmd_stats`、`cmd_ask` 风格一致）
+- **状态**：✅ 完成

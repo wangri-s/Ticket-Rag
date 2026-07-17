@@ -252,6 +252,8 @@ def _print_result(result: dict, mode: str):
 
 def _print_stats(mode: str, top_k: int, ticket_id: str):
     """显示当前交互状态"""
+    from src.config import get_config
+
     cfg = get_config()
     print(f"""
   当前设置:
