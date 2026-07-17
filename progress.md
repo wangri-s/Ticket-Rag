@@ -401,3 +401,11 @@
   - **修复 6** — 测试编号从 12 个扩展到 14 个，修正重复编号
   - **修复 7** — `src/cli.py` `_print_stats()` 函数缺少 `from src.config import get_config` 导入，补上局部导入（与其他函数 `cmd_stats`、`cmd_ask` 风格一致）
 - **状态**：✅ 完成
+
+## 步骤 34：适配 pymilvus 3.0 — 修复 sparse_embedder 导入路径
+- **时间**：2026-07-18
+- **操作**：
+  - **问题**：pymilvus 3.0 移除了 `pymilvus.model` 子包，BM25 相关 API 迁移到独立包 `milvus_model`，导致 `from pymilvus.model.sparse import BM25EmbeddingFunction` 报 `ModuleNotFoundError`
+  - **修复**：`src/embedding/sparse_embedder.py` 中 `pymilvus.model.sparse` → `milvus_model.sparse`，`pymilvus.model.sparse.bm25.tokenizers` → `milvus_model.sparse.bm25.tokenizers`
+  - `requirements.txt` 补上缺失的 `milvus-model` 依赖
+- **状态**：✅ 完成
