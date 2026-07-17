@@ -16,16 +16,18 @@
 | **关键字检索** | BM25 稀疏向量 + 倒排索引，精确匹配术语和型号 |
 | **混合检索** | 语义 + 关键字加权重排，互补盲区 |
 | **RAG 生成** | 检索→Prompt 拼接→LLM 生成，回答带工单引用来源 |
-| **安全兜底** | 医疗专家 system prompt + 安全守则 + 无结果回退 |
+| **流式输出** | LLM 逐 token 返回，前端打字机效果 |
+| **安全兜底** | 医疗专家 System Prompt + 安全守则 + 无结果回退 |
 
 ### 技术栈
 
 ```
-检索:  Milvus 2.x (IVF_FLAT + SPARSE_INVERTED_INDEX)
-嵌入:  DashScope text-embedding-v1 (1536d)
-分词:  jieba + BM25 (pymilvus.model.sparse)
-LLM:   DashScope Qwen-Max
-框架:  FastAPI + LangChain + pymilvus 3.0
+检索:     Milvus 2.x (IVF_FLAT + SPARSE_INVERTED_INDEX)
+嵌入:     DashScope text-embedding-v1 (1536d)
+分词:     jieba + BM25 (milvus-model)
+LLM:      DashScope Qwen-Max
+框架:     FastAPI + LangChain + pymilvus 3.0
+前端:     Streamlit（对话式 UI，流式输出）
 ```
 
 ---
@@ -34,11 +36,12 @@ LLM:   DashScope Qwen-Max
 
 ```
 智能工单/
-├── config.yml                 # 应用配置（Milvus/Embedding/LLM/Retrieval/Chunking）
+├── config.yml                 # 应用配置（Milvus / Embedding / LLM / Retrieval / Chunking）
 ├── .env                       # 环境变量（API Key 等，不入 git）
-├── docker-compose.yml         # Docker 编排（etcd + minio + milvus + attu）
+├── docker-compose.yml         # Docker 编排（etcd + minio + milvus + attu + rag-app）
 ├── Dockerfile                 # 应用容器
 ├── requirements.txt           # Python 依赖
+├── README.md                  # 本文件
 ├── build_milvus.py            # ETL 构建脚本（加载→分块→向量化→入库）
 │
 ├── data/
@@ -47,9 +50,8 @@ LLM:   DashScope Qwen-Max
 │
 ├── src/
 │   ├── config.py              # 配置加载器（.env + config.yml → 类型化对象）
-│   ├── main.py                # FastAPI 应用入口
-│   ├── cli.py                 # 命令行工具（ingest / preview / stats / ask）
-│   ├── interactive.py         # 交互式问答终端（启动即用）
+│   ├── main.py                # FastAPI 应用入口（CORS + 日志 + 异常处理）
+│   ├── cli.py                 # 命令行工具（ingest / preview / stats / ask + 交互模式）
 │   │
 │   ├── ingestion/             # 文档摄入
 │   │   ├── loader.py          #   文档加载器（TXT/PDF）
@@ -64,21 +66,26 @@ LLM:   DashScope Qwen-Max
 │   │   └── milvus_client.py   #   Milvus 操作封装（增删查 + 双路检索）
 │   │
 │   ├── llm/                   # 大模型
-│   │   ├── llm_client.py      #   千问 API 封装（重试 + 退避）
+│   │   ├── llm_client.py      #   千问 API 封装（重试 + 退避 + 流式）
 │   │   ├── prompts.py         #   提示词管理（格式化 + 模板填充）
-│   │   └── rag_chain.py       #   RAG 核心链（检索→Prompt→生成）
+│   │   └── rag_chain.py       #   RAG 核心链（检索→Prompt→生成 + 流式）
 │   │
-│   └── api/                   # REST API
-│       └── search.py          #   检索接口（semantic/keyword/hybrid）
+│   ├── api/                   # REST API
+│   │   ├── search.py          #   检索接口（semantic / keyword / hybrid）
+│   │   └── ask.py             #   RAG 问答接口（/api/ask + /api/ask/stream）
+│   │
+│   └── ui/                    # 前端
+│       └── app.py             #   Streamlit 对话式界面（流式打字机效果）
 │
-└── tests/                     # 测试（43 tests, 0 failed）
+└── tests/                     # 测试
     ├── test_config.py
     ├── test_chunker.py
     ├── test_loader.py
     ├── test_pipeline.py
     ├── test_milvus.py
     ├── test_milvus_manual.py
-    └── test_embed_manual.py
+    ├── test_embed_manual.py
+    └── test_rag.py            # RAG 全链路集成测试
 ```
 
 ---
@@ -134,6 +141,7 @@ python build_milvus.py --rebuild
 ```
 
 输出：
+
 ```
 [1/5] 加载文档    1 文档, 7118 字符
 [2/5] 文本分块    22 块 (avg=322 字符)
@@ -148,15 +156,17 @@ python build_milvus.py --rebuild
 三种方式任选：
 
 ```bash
-# 方式 1：交互式终端（推荐）
-python -m src.interactive
+# 方式 1：Web 对话界面（推荐）
+streamlit run src/ui/app.py
+# 打开 http://localhost:8501
 
 # 方式 2：API 服务
-uvicorn src.main:app --port 8000
+python -m src.main
 # 打开 http://localhost:8000/docs 查看 Swagger
 
-# 方式 3：命令行单条问答
-python -m src.cli ask -q "CT伪影怎么处理？" -m hybrid
+# 方式 3：命令行
+python -m src.cli ask -q "CT伪影怎么处理？" -m hybrid     # 单次问答
+python -m src.cli ask                                      # 交互模式
 ```
 
 ---
@@ -175,23 +185,58 @@ python -m src.cli ask -q "CT伪影怎么处理？" -m hybrid
 
 ## API 接口
 
+### 检索（不调 LLM）
+
 | 端点 | 方法 | 说明 |
 |------|------|------|
 | `/api/search/semantic` | POST | 语义检索 |
 | `/api/search/keyword` | POST | 关键字检索 |
 | `/api/search/hybrid` | POST | 混合检索 |
+
+### RAG 问答（检索 + LLM 生成）
+
+| 端点 | 方法 | 说明 |
+|------|------|------|
+| `/api/ask` | POST | RAG 全链路问答 |
+| `/api/ask/stream` | POST | RAG 流式问答（SSE） |
+
+### 运维
+
+| 端点 | 方法 | 说明 |
+|------|------|------|
 | `/health` | GET | 健康检查 |
-| `/docs` | GET | Swagger 文档 |
+| `/` | GET | API 导航页 |
+| `/docs` | GET | Swagger 交互文档 |
+| `/redoc` | GET | ReDoc 文档 |
 
 请求示例：
 
 ```json
-POST /api/search/hybrid
+POST /api/ask
 {
-  "query": "CT扫描图像伪影",
-  "top_k": 5,
-  "dense_weight": 0.5,
-  "sparse_weight": 0.5
+  "question": "CT扫描图像伪影是什么原因？",
+  "mode": "hybrid",
+  "top_k": 3
+}
+```
+
+响应：
+
+```json
+{
+  "question": "CT扫描图像伪影是什么原因？",
+  "answer": "### 1. 故障分析\n根据工单记录，CT扫描图像伪影...",
+  "sources": [
+    {
+      "ticket_id": "GD-2026-03001",
+      "content": "...",
+      "score": 0.9786,
+      "source": "工单知识库.txt"
+    }
+  ],
+  "mode": "hybrid",
+  "has_answer": true,
+  "latency_ms": 2340.5
 }
 ```
 
@@ -218,11 +263,29 @@ POST /api/search/hybrid
     │
     ▼
 ④ LLM 生成 (Qwen-Max)
-    按格式输出: 故障分析 → 参考案例 → 处理步骤 → 注意事项
+    ├─ 流式模式: 逐 token 返回（打字机效果）
+    └─ 按格式输出: 故障分析 → 参考案例 → 处理步骤 → 注意事项
     │
     ▼
 ⑤ 返回
     { "answer": "...", "sources": [{ticket_id, score, content}, ...] }
+```
+
+---
+
+## 前端界面
+
+Streamlit 对话式 UI，支持：
+
+- 🎨 **类 ChatGPT 对话风格**：双气泡，消息历史累积
+- ⚡ **流式打字机效果**：LLM 逐 token 输出，实时渲染
+- 🔍 **三种检索模式切换**：侧边栏下拉
+- 📚 **引用来源可视化**：分数进度条 + 工单号 + 来源文件
+- 💡 **快捷测试问题**：侧边栏一键发送
+
+```bash
+streamlit run src/ui/app.py
+# → http://localhost:8501
 ```
 
 ---
@@ -244,10 +307,9 @@ System Prompt 内置 4 条安全守则：
 
 ```bash
 pytest tests/ -v
-# 43 tests passed, 0 failed
 ```
 
-覆盖：配置加载、文档分块、工单编号提取、向量化、Milvus 增删查、标量过滤、语义/关键字/混合检索。
+覆盖：配置加载、文档分块、工单编号提取、向量化、Milvus 增删查、标量过滤、三种检索模式、RAG 全链路集成、边界情况（空输入、无效模式、兜底、过滤）。
 
 ---
 

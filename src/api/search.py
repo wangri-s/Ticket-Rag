@@ -14,6 +14,7 @@ from typing import Optional
 from fastapi import APIRouter, Query
 from pydantic import BaseModel, Field
 
+from src.config import ROOT_DIR
 from src.embedding.embedding_client import EmbeddingClient
 from src.embedding.sparse_embedder import BM25SparseEmbedder
 from src.ingestion.loader import DocumentLoader
@@ -65,7 +66,7 @@ def _get_dense_embedder() -> EmbeddingClient:
 def _get_sparse_embedder() -> BM25SparseEmbedder:
     """加载语料并训练 BM25（首次调用时执行，后续缓存）"""
     logger.info("正在训练 BM25 模型...")
-    docs = DocumentLoader().load_directory("data/documents")
+    docs = DocumentLoader().load_directory(str(ROOT_DIR / "data/documents"))
     chunks = MedicalWorkOrderChunker().split_documents(docs)
     contents = [c.page_content for c in chunks]
     embedder = BM25SparseEmbedder()

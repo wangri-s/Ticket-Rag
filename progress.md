@@ -426,3 +426,82 @@
   - **修复 2**：改为 `pytest.raises(ValueError, match="输入文本为空")` 匹配预期抛异常
   - **实测**：14 tests passed, 0 failed ✅
 - **状态**：✅ 完成
+
+## 步骤 37：生成 FastAPI 完整接口（RAG 问答 + 流式 + 中间件）
+- **时间**：2026-07-18
+- **操作**：
+  - **新建 `src/api/ask.py`** — RAG 问答 API（检索 + LLM 生成全链路）：
+    - `POST /api/ask` — RAG 问答，请求体含 question/mode/top_k/ticket_id，返回 answer + sources + latency_ms
+    - `POST /api/ask/stream` — SSE 流式输出，前端可逐字展示回答
+    - `GET /api/ask/health` — 检查 RAGChain 初始化状态
+    - 请求模型 `AskRequest` 含参数校验（question 1-2000字符、mode 正则校验、top_k 1-20）
+    - RAGChain 模块级懒加载单例，首次调用初始化，后续零等待
+  - **修复 `src/api/search.py`** — 两处改动：
+    - 补 `from src.config import ROOT_DIR` 导入
+    - `_get_sparse_embedder()` 中 `load_directory("data/documents")` → `load_directory(str(ROOT_DIR / "data/documents"))`，修复非项目根目录启动时路径错误（与步骤 35 同款 bug）
+  - **重写 `src/main.py`** — 应用入口升级：
+    - 新增 CORS 中间件（`allow_origins=["*"]`），允许前端跨域
+    - 新增请求日志中间件（记录 method + path + status + 耗时）
+    - 新增全局异常捕获（500 → JSON 友好错误信息）
+    - 新增 lifespan 生命周期日志
+    - 注册 `search_router` + `ask_router`
+    - 更新 `/` 根路由，列出全部 7 个端点
+    - `__main__` 直接运行入口（`uvicorn.run` with reload）
+  - **依赖**：`fastapi` + `uvicorn` 已在 requirements.txt 中 ✅
+- **状态**：✅ 完成
+
+## 步骤 38：生成 Streamlit 前端页面
+- **时间**：2026-07-18
+- **操作**：
+  - **新建 `src/ui/app.py`** — 简洁 RAG 问答前端：
+    - **侧边栏**：检索模式（下拉）、top_k（滑块 1-10）、工单号过滤（输入框）、系统配置（折叠面板）
+    - **主区域**：标题 + 5 个快捷测试问题按钮（点击填入输入框）+ 提问/清空按钮
+    - **回答区**：耗时 + 模式 + 来源数 + 命中状态 + LLM 回答（命中绿/兜底黄）
+    - **来源区**：每条折叠面板，含分数进度条可视化、完整内容展示
+    - **性能**：`@st.cache_resource` 缓存 RAGChain，刷新不复初始化
+    - **异常处理**：try/except 捕获 RAG 链路错误
+  - **依赖**：`streamlit>=1.35.0` 已在 requirements.txt ✅
+- **状态**：✅ 完成
+
+## 步骤 39：重写 Streamlit 为经典 LLM 对话界面
+- **时间**：2026-07-18
+- **操作**：
+  - **重写 `src/ui/app.py`** — 从表单式改为对话式：
+    - **双气泡对话**：`st.chat_message("user")` + `st.chat_message("assistant")`，用户右/助手左
+    - **对话历史**：`st.session_state.messages` 保存完整记录，刷新不丢失
+    - **底部输入框**：`st.chat_input` 固定在底部，Enter 发送
+    - **即时反馈**：先显示 "⏳ 正在检索+生成..." 占位，完成后替换为正式回答
+    - **元信息**：每条助手回复下方灰色小字显示命中状态、检索模式、来源数、耗时
+    - **来源折叠**：每条助手消息内嵌 `expander`，展开查看来源 + 分数进度条
+    - **侧边栏快捷问题**：8 个按钮点击即发送，同时保留检索参数设置
+    - **清空对话按钮**：侧边栏一键重置历史
+  - **实测**：UI 布局与 ChatGPT/Claude 风格一致 ✅
+- **状态**：✅ 完成
+
+## 步骤 40：LLM 流式输出 + Streamlit 打字机效果
+- **时间**：2026-07-18
+- **操作**：
+  - **`src/llm/llm_client.py`** — 新增 `generate_stream()` 方法：
+    - 使用 DashScope `stream=True + incremental_output=True` 逐 token 获取增量
+    - `_call_stream()` 内部方法，yield 每个文本增量
+    - 自动统计输出字符数
+  - **`src/llm/rag_chain.py`** — 新增 `ask_stream()` 方法：
+    - 检索逻辑与 `ask()` 一致（三种模式 + 阈值过滤 + 兜底）
+    - 返回 `{"stream": generator, "sources": [...], ...}`，调用方迭代 stream 字段获取增量
+  - **`src/ui/app.py`** — 流式打字机效果：
+    - 用 `chain.ask_stream()` 代替 `chain.ask()`
+    - 先显示 "🔍 正在检索..." → 检索完成显示 "✍️ 正在生成..."
+    - `for chunk in result["stream"]` 逐段渲染，末尾带闪烁光标 `▌`
+    - 生成完成后光标消失，追加元信息 + 来源折叠
+- **状态**：✅ 完成
+
+## 步骤 41：更新 README.md
+- **时间**：2026-07-18
+- **操作**：
+  - 更新项目结构（移除已删除的 `interactive.py`，新增 `api/ask.py`、`ui/app.py`、`tests/test_rag.py`）
+  - 更新技术栈（milvus-model、Streamlit、流式输出）
+  - 新增 API 接口文档（`/api/ask` + `/api/ask/stream` + 请求/响应示例）
+  - 新增前端界面章节（Streamlit 对话式 UI）
+  - 修正快速开始中的命令（`src.interactive` → `src.cli ask`）
+  - 更新测试说明（加入 RAG 全链路集成测试）
+- **状态**：✅ 完成

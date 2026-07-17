@@ -68,6 +68,29 @@ class LLMClient:
 
         return self.chat(messages)
 
+    def generate_stream(
+        self,
+        user_message: str,
+        system_prompt: Optional[str] = None,
+    ):
+        """
+        流式生成：逐 token 返回，适合前端打字机效果。
+
+        用法:
+          for chunk in client.generate_stream(user_message="..."):
+              print(chunk, end="", flush=True)
+        """
+        if system_prompt is None:
+            cfg = get_config().llm
+            system_prompt = cfg.system_prompt
+
+        messages = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": user_message})
+
+        yield from self._call_stream(messages)
+
     def chat(self, messages: list[dict]) -> str:
         """
         多轮对话：传入完整 messages 列表，返回模型回复。
@@ -135,3 +158,35 @@ class LLMClient:
         )
 
         return output.text
+
+    def _call_stream(self, messages: list[dict]):
+        """流式 API 调用，逐 token yield 文本增量"""
+        kwargs = {
+            "model": self.model,
+            "messages": messages,
+            "api_key": self.api_key,
+            "temperature": self.temperature,
+            "max_tokens": self.max_tokens,
+            "top_p": self.top_p,
+            "seed": self.seed,
+            "stream": True,
+            "incremental_output": True,
+        }
+
+        resp = Generation.call(**kwargs)
+
+        total_tokens = 0
+        for chunk in resp:
+            if chunk.status_code != 200:
+                raise RuntimeError(
+                    f"DashScope LLM 流式返回错误 "
+                    f"code={chunk.status_code} message={chunk.message}"
+                )
+            delta = chunk.output.text if chunk.output else ""
+            if delta:
+                total_tokens += len(delta)
+                yield delta
+
+        logger.info(
+            f"LLM 流式调用完成: total_output≈{total_tokens} chars"
+        )

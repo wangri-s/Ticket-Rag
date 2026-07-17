@@ -161,6 +161,80 @@ class RAGChain:
             "has_answer": True,
         }
 
+    def ask_stream(
+        self,
+        question: str,
+        mode: SearchMode = "hybrid",
+        top_k: int = None,
+        ticket_id_filter: str = None,
+    ) -> dict:
+        """
+        RAG 流式问答：检索后用 LLM 逐 token 输出。
+
+        返回:
+          {
+            "question": str,
+            "sources":  list[dict],
+            "mode":     str,
+            "has_answer": bool,
+            "stream":   generator → yield text chunks,   # ← 调用方迭代此字段
+          }
+
+        用法:
+          result = chain.ask_stream("CT伪影怎么处理？")
+          for chunk in result["stream"]:
+              print(chunk, end="", flush=True)
+        """
+        if top_k is None:
+            top_k = self._cfg.llm.retrieval_top_k
+        if mode is None:
+            mode = self._cfg.retrieval.default_mode
+
+        expr = f'ticket_id == "{ticket_id_filter}"' if ticket_id_filter else None
+        chunks = self._retrieve(question, mode, top_k, expr)
+
+        score_threshold = self._cfg.retrieval.score_threshold
+        chunks = [c for c in chunks if c.get("score", 0.0) >= score_threshold]
+
+        system_prompt, user_message = build_full_prompt(question, chunks, ticket_id_filter)
+
+        # 无结果 → 兜底（无流式，直接返回完整文本）
+        if user_message is None:
+            def _fallback_stream():
+                yield get_fallback_answer()
+
+            return {
+                "question": question,
+                "sources": [],
+                "mode": mode,
+                "has_answer": False,
+                "stream": _fallback_stream(),
+            }
+
+        # 有结果 → 流式 LLM
+        logger.info(f"RAG 流式问答: mode={mode} question='{question[:40]}' chunks={len(chunks)}")
+
+        stream_gen = self._llm.generate_stream(
+            user_message=user_message,
+            system_prompt=system_prompt,
+        )
+
+        return {
+            "question": question,
+            "sources": [
+                {
+                    "ticket_id": c.get("ticket_id", ""),
+                    "content": c.get("content", ""),
+                    "source": c.get("source", ""),
+                    "score": c.get("score", 0.0),
+                }
+                for c in chunks
+            ],
+            "mode": mode,
+            "has_answer": True,
+            "stream": stream_gen,
+        }
+
     # ── 检索分发 ────────────────────────────
 
     def _retrieve(
