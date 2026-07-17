@@ -16,7 +16,7 @@ import logging
 from functools import lru_cache
 from typing import Literal, Optional
 
-from src.config import get_config
+from src.config import ROOT_DIR, get_config
 from src.embedding.embedding_client import EmbeddingClient
 from src.embedding.sparse_embedder import BM25SparseEmbedder
 from src.ingestion.loader import DocumentLoader
@@ -41,7 +41,7 @@ def _get_dense_embedder() -> EmbeddingClient:
 def _get_sparse_embedder() -> BM25SparseEmbedder:
     """加载语料并训练 BM25"""
     logger.info("正在训练 BM25 模型...")
-    docs = DocumentLoader().load_directory("data/documents")
+    docs = DocumentLoader().load_directory(str(ROOT_DIR / "data/documents"))
     chunks = MedicalWorkOrderChunker().split_documents(docs)
     contents = [c.page_content for c in chunks]
     embedder = BM25SparseEmbedder()
