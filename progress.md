@@ -409,3 +409,10 @@
   - **修复**：`src/embedding/sparse_embedder.py` 中 `pymilvus.model.sparse` → `milvus_model.sparse`，`pymilvus.model.sparse.bm25.tokenizers` → `milvus_model.sparse.bm25.tokenizers`
   - `requirements.txt` 补上缺失的 `milvus-model` 依赖
 - **状态**：✅ 完成
+
+## 步骤 35：修复 BM25 训练路径 — 相对路径 → 项目根绝对路径
+- **时间**：2026-07-18
+- **操作**：
+  - **问题**：`rag_chain.py` `_get_sparse_embedder()` 中 `DocumentLoader().load_directory("data/documents")` 使用相对路径，PyCharm/pytest 从 `tests/` 目录运行测试时 cwd 不是项目根，导致 `NotADirectoryError`
+  - **修复**：导入 `config.py` 的 `ROOT_DIR`（`Path(__file__).resolve().parent.parent`），改为 `load_directory(str(ROOT_DIR / "data/documents"))`
+- **状态**：✅ 完成
