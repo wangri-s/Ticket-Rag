@@ -14,8 +14,8 @@ BM25 稀疏向量生成器 — 用于关键字检索
 import logging
 from typing import Optional
 
-from pymilvus.model.sparse import BM25EmbeddingFunction
-from pymilvus.model.sparse.bm25.tokenizers import build_default_analyzer
+from milvus_model.sparse import BM25EmbeddingFunction
+from milvus_model.sparse.bm25.tokenizers import build_default_analyzer
 
 logger = logging.getLogger(__name__)
 
