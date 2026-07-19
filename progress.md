@@ -505,3 +505,193 @@
   - 修正快速开始中的命令（`src.interactive` → `src.cli ask`）
   - 更新测试说明（加入 RAG 全链路集成测试）
 - **状态**：✅ 完成
+
+## 步骤 42：检索增加 Reranker 重排序阶段（qwen3-rerank 交叉编码器）
+- **时间**：2026-07-18
+- **操作**：
+  - **优化方式**：**两阶段检索（粗召回 + 精排）**
+    - **Stage 1 — 粗召回**：双路混合检索（稠密 IVF_FLAT + 稀疏 BM25），多召回 top_k × 3 条候选（上限 20）
+    - **Stage 2 — 精排**：DashScope **qwen3-rerank 交叉编码器**对每个候选 (query, chunk) 对独立打分（非向量余弦），按 relevance_score 降序取 top_k
+    - **与双编码器区别**：embedding 模型分别编码 query 和 doc，通过向量余弦计算相似度；交叉编码器将 query+doc 拼接后过 Transformer，直接输出相关性分数，显著更精准
+  - **新增 `src/retrieval/reranker.py`**：
+    - `Reranker` 类：封装 `dashscope.TextReRank.call(model="qwen3-rerank")`
+    - `rerank(query, chunks, top_n)` 方法：传入初检结果，返回精排后列表（score 替换为 relevance_score）
+    - 失败降级：API 异常时回退原始向量排序，保证可用性
+    - 内容截断：单条 >3000 字符自动截断，避免超 4000 token 上限
+  - **更新 `config.yml`** — `retrieval` 下新增 `rerank` 配置节：
+    - `enabled: false`（默认关闭，按需开启）
+    - `model: qwen3-rerank` / `oversample_factor: 3` / `max_retries: 3` / `timeout: 30`
+  - **更新 `src/config.py`**：
+    - 新增 `RerankConfig` 数据类（enabled/model/api_key/oversample_factor/max_retries/timeout）
+    - `RetrievalConfig` 新增 `self.rerank = RerankConfig(...)`
+    - `AppConfig` 新增 `self.rerank` 快捷访问，自动注入 DASHSCOPE_API_KEY
+  - **更新 `src/llm/rag_chain.py`**：
+    - 新增 `_get_reranker()` 懒加载 + `_retrieve_with_rerank()` 两阶段检索方法
+    - `ask()` 和 `ask_stream()` 新增 `rerank: bool = None` 参数（None=取 config 默认值）
+    - 日志增加 `rerank=True/False` 标记
+  - **更新 `src/api/ask.py`** — `AskRequest` 新增 `rerank: bool = False`
+  - **更新 `src/ui/app.py`** — 侧边栏检索参数区新增"启用重排序"复选框（默认关闭，hover 提示说明原理）
+- **实测**：rerank=True 时检索日志显示 `oversample_k=15 → rerank candidates=15 → top_n=5` ✅
+- **状态**：✅ 完成
+
+## 步骤 43：增加 Query 预处理（查询改写 + 多路召回扩展点）
+- **时间**：2026-07-18
+- **操作**：
+  - **优化方式**：**检索前查询预处理**，弥合用户口语化描述与知识库专业术语之间的差距
+    - **Query Rewrite（查询改写）**：LLM 将口语问题改写为检索友好的关键词组合
+      - Prompt 设计：指定医疗设备领域角色 + 4 条规则 + 3 个示例（Few-shot）
+      - 示例："机器拍出来的片子不清楚"→"CT 图像伪影 分辨率下降 探测器校准"
+      - 改写结果只用于检索，LLM 生成仍用原始问题（保证回答匹配用户原意）
+      - 失败降级：rewrite 失败时自动回退原查询
+    - **Multi-Query（多路召回）**：保留扩展点（LLM 生成 N 个变体各自检索合并去重），默认关闭
+  - **新增 `src/retrieval/query_processor.py`**：
+    - `QueryProcessor` 类：封装 LLM 查询改写/扩展
+    - `rewrite(question)→str`：口语→关键词，使用独立 LLMClient 实例（低温度）
+    - `expand(question, n)→list[str]`：生成 N 个语义等价变体
+    - 两个 Prompt 模板：QUERY_REWRITE_PROMPT（Few-shot）、MULTI_QUERY_PROMPT
+  - **更新 `config.yml`** — `retrieval` 下新增 `query_preprocess` 配置节：
+    - `enabled: false`（默认关闭）/ `rewrite: true` / `multi_query: false` / `multi_query_n: 3`
+  - **更新 `src/config.py`** — 新增 `QueryPreprocessConfig`
+  - **更新 `src/llm/rag_chain.py`**：
+    - 新增 `_get_query_processor()` 懒加载 + `_expand_query()` 方法
+    - `ask()` 和 `ask_stream()` 新增 `query_expansion` 参数
+    - 检索前先改写 query，Prompt 仍用原始问题
+  - **更新 `src/api/ask.py`** — `AskRequest` 新增 `query_expansion: bool = False`
+  - **更新 `src/ui/app.py`** — 侧边栏新增"启用查询扩展"复选框
+- **实测**：`question="机器拍出来的片子不清楚"` → `rewrite="CT 图像伪影 分辨率下降 探测器校准"` ✅
+- **状态**：✅ 完成
+
+## 步骤 44：分词器显式切换为 jieba + 加载医疗领域自定义词典
+- **时间**：2026-07-20
+- **操作**：
+  - **背景**：`build_default_analyzer(language="zh")` 底层已是 `JiebaTokenizer`，但代码中不可见
+  - **改为显式**：`import jieba` + 注释标明分词链路（原始文本→jieba.cut→tokens→BM25→稀疏向量）
+  - **新增医疗领域自定义词典**：`_MEDICAL_TERMS` 列表包含 25 个医学术语，通过 `jieba.add_word()` 预加载
+    - 设备名称：血液透析机、生化分析仪、超声诊断仪、高压灭菌器等
+    - 医学术语：电导率、伪影、定标、透析液、声学堆栈等
+    - 故障术语：分辨率下降、图像模糊、数据断连、漏气测试等
+  - **作用**：确保专业术语不被错误切分（如"电导率"不会切成"电/导率"，"血液透析机"不会切成"血液/透析/机"）
+  - **初始化**：`BM25SparseEmbedder.__init__()` 中调用 `_init_jieba()`，日志输出 "jieba 分词器已加载 25 个医疗领域术语"
+- **状态**：✅ 完成
+
+## 步骤 45：增加元数据过滤（设备类型 + 表达式构建器）
+- **时间**：2026-07-20
+- **操作**：
+  - **新增字段**：Milvus schema 增加 `device_type` VARCHAR(64) 字段，所有 search 方法输出中包含
+  - **chunker.py** — 新增 `extract_device_type()` 正则提取（匹配`【设备类型】xxx`），`split_documents()` 中自动提取并存入 metadata（含继承逻辑）
+  - **milvus_client.py** — schema 加字段、`insert()` 加 `device_types` 参数、3 个 search 方法的 hit 提取加 `device_type`
+  - **新增 `src/retrieval/metadata_filter.py`** — 过滤表达式构建工具：
+    - `build_filter_expr(ticket_id, device_type)` → Milvus filter 表达式
+    - 多条件自动 AND 拼接，None/空值跳过
+    - `KNOWN_DEVICE_TYPES` 列表（10 种设备）供 UI 下拉使用
+  - **build_milvus.py** — 传入 `device_types` 列表
+  - **rag_chain.py** — `ask()`/`ask_stream()` 新增 `device_type_filter` 参数，用 `build_filter_expr()` 统一构建表达式
+  - **api/ask.py** — `AskRequest` 新增 `device_type` 字段，两个端点传递 `device_type_filter`
+  - **ui/app.py** — 侧边栏新增"按设备类型过滤"下拉框（10 种设备 + 全部）
+  - **⚠️ 注意**：schema 变更需重建 collection `python build_milvus.py --rebuild`
+- **状态**：✅ 完成
+
+## 步骤 46：提示词工程增强（Few-shot + Chain-of-Thought + JSON Schema）
+- **时间**：2026-07-20
+- **操作**：
+  - **三项增强**：
+    1. **少样本示例（Few-shot）**：在 `rag_prompt_template` 中加入一个完整的带标注问答示例（透析液电导率报警），展示标准回答格式和详细程度，提升输出格式稳定性
+    2. **思维链（Chain-of-Thought）**：在 `system_prompt` 中添加 5 步推理框架（拆解现象→列举可能原因→对照工单证据→排除与确认→形成建议），并附带具体推理示例。对于鉴别诊断类问题引导模型先分析症状再给建议
+    3. **JSON Schema 约束输出**：新增 `json_prompt_template`，用 JSON Schema 约束模型输出（含字段：question、has_reference、analysis、references、recommendations），附带完整 JSON 示例。API 场景下避免下游解析失败
+  - **config.yml** — `system_prompt` 新增【思考方式—思维链】章节；`rag_prompt_template` 新增 Few-shot 示例；新增 `json_prompt_template`；新增 `output_format` 默认配置
+  - **config.py** — `LLMConfig` 新增 `output_format`（默认 "text"）、`json_prompt_template`
+  - **prompts.py** — 新增 `build_json_prompt()`、`get_json_fallback()`；`build_full_prompt()` 新增 `output_format` 参数按格式分发
+  - **rag_chain.py** — `ask()`/`ask_stream()` 新增 `output_format` 参数；无结果兜底区分 text/json
+  - **api/ask.py** — `AskRequest`/`AskResponse` 新增 `output_format` 字段（pattern: text|json）
+  - **ui/app.py** — 侧边栏新增"输出格式"下拉框（📝 自然语言 / 🔧 JSON 结构化）；JSON 模式自动渲染 `st.json()` 格式化视图
+- **面试要点**：
+  1. **Few-shot 为什么有效**：大模型对格式指令的遵循度不稳定，但在 Prompt 中给 1-2 个高质量示例后，模型通过 in-context learning 会自动对齐输出格式和详细程度
+  2. **Chain-of-Thought 的价值**：医疗运维中很多故障是鉴别诊断问题（如"图像模糊"可能来自探测器、球管、或重建算法）。5 步推理链引导模型逐步分析，比直接给答案更可靠，也便于工程师追溯推理过程
+  3. **JSON Schema 的应用场景**：API 场景下下游系统需要结构化数据。在 Prompt 中嵌入 JSON Schema 让模型直接返回可解析的 JSON（含 urgency 紧急程度评估），避免下游用正则拆分自然语言
+  4. **为什么用 Prompt 约束而非 function calling**：当前模型的 function calling 支持有限，用 JSON Schema 嵌入 Prompt 的方式更可控、可调试，且不依赖特定模型的 function calling 实现
+- **状态**：✅ 完成
+
+## 步骤 47：三级对话记忆系统（Redis 短期 + Kafka 管道 + MySQL 长期 + LLM 中期摘要）
+- **时间**：2026-07-20
+- **架构**：
+  ```
+  用户消息 → Redis（短期，毫秒级）
+           ↘ Kafka Producer（异步，不阻塞）
+               → Kafka Topic → Kafka Consumer（后台线程）
+                   → MySQL（长期，永久存储）
+
+  每 5 轮对话 → LLM 摘要 → Redis（中期记忆）+ Kafka → MySQL
+  ```
+- **操作**：
+  - **新增 `src/memory/` 模块**（6 个文件）：
+    - `__init__.py` — 模块说明
+    - `redis_client.py` — **短期记忆**：List 结构存储最近 N 条消息（默认 20 条），TTL 24h 自动过期；`add_message()` 自动 trim + 续期；`get_messages()`/`get_summary()` 读取；连接失败 → 降级为无记忆模式
+    - `mysql_client.py` — **长期记忆**：两张表 `rag_conversations`（消息）+ `rag_summaries`（摘要）；自动建库建表；DictCursor 返回字典；连接池支持
+    - `kafka_client.py` — **消息队列**：`KafkaProducerClient` 完全异步发送（不等待 ack）；`KafkaConsumerClient` 后台线程消费写入 MySQL；JSON 序列化
+    - `summarizer.py` — **LLM 摘要生成器**：每 5 轮触发一次；DashScope 调用 qwen-max；Prompt 要求提炼设备类型+诊断结论+工单引用+未解决问题；失败返回 None 不阻塞
+    - `memory_manager.py` — **三级记忆编排器**：`add_message()` 同时写入 Redis + 异步 Kafka；`get_context()` 返回消息+摘要；`build_memory_prompt()` 格式化为 LLM 可用的上下文
+  - **config.yml** — 新增 `memory` 配置段（redis/mysql/kafka/summary 四部分）
+  - **config.py** — 新增 `RedisConfig`、`MySQLConfig`、`KafkaConfig`、`SummaryConfig`、`MemoryConfig` 五个配置类
+  - **rag_chain.py** — `ask()`/`ask_stream()` 新增 `session_id` 参数；自动保存 user/assistant 消息；Prompt 注入对话历史背景；流式模式包装生成器，流结束后保存完整回答
+  - **api/ask.py** — `AskRequest`/`AskResponse` 新增 `session_id` 字段
+  - **ui/app.py** — 自动生成 session_id（`uuid4().hex[:12]`）；侧边栏显示会话记忆状态；清空对话时生成新 session_id
+- **设计要点**：
+  1. **三级记忆为什么这样划分**：短期用 Redis（毫秒读写，适合实时对话）；长期用 MySQL（持久可靠，支持复杂查询）；中期用 LLM 摘要（每 5 轮压缩，既控制 token 消耗又不丢失上下文）
+  2. **为什么加 Kafka**：直接写 MySQL 会阻塞聊天响应（网络延迟+事务）。通过 Kafka 解耦：写 Redis → 发 Kafka → 立即返回，后台 consumer 慢慢写 MySQL。Kafka 不可用时不影响核心功能
+  3. **优雅降级**：所有外部依赖（Redis/Kafka/MySQL）不可用时只记录 warning 日志，不影响 RAG 问答。`session_id` 不传就是无记忆模式，向后兼容
+  4. **摘要触发时机**：选在 `role == "assistant"` 且 `turn % 5 == 0` 时触发，确保新一轮对话完整后才生成摘要
+  5. **流式记忆保存**：`ask_stream()` 包装生成器，在所有 chunk 产生后拼接完整回答再写入记忆，避免流式过程中的多次写入
+- **状态**：✅ 完成
+
+## 步骤 48：MySQL + Kafka 增加指数退避重试机制
+- **时间**：2026-07-20
+- **操作**：
+  - **config.yml / config.py** — MySQL/Kafka 配置新增 `retry_base_delay`（默认 0.5s）、`retry_max_delay`（默认 5.0s）
+  - **mysql_client.py** — 全面重写重试逻辑：
+    - 新增 `_retry_with_backoff()` 通用重试包装器（指数退避: 0.5s→1s→2s→4s，上限 5s）
+    - 新增 `_is_retryable()` — 区分可重试错误码（2002/2003/2006/2013/1205/1213）vs 不可重试错误
+    - 新增 `_reset_connection()` — 写操作失败时强制关闭旧连接 + 重建
+    - 新增 `_sleep_backoff()` — 指数退避等待
+    - 写操作（`insert_message`/`insert_summary`/`init_tables`）：最多 3 次重试，死连接自动重连
+    - 读操作（`get_history`/`get_summaries`）：最多 2 次轻量重试，不重连
+    - `_get_conn()` 增加 `ping(reconnect=False)` 检测连接存活
+    - 连接增加 `connect_timeout=5`、`read_timeout=10`、`write_timeout=10`
+  - **kafka_client.py** — Producer 重试增强：
+    - 新增 `_ensure_producer()` — producer 失效时指数退避重连（最多 3 次）
+    - 新增 `_send_with_retry()` — 统一发送重试逻辑：
+      - 先确保 producer 可用 → 再发送
+      - `KafkaError.retriable` → 区分可重试 vs 不可重试
+      - 可重试错误：关闭旧 producer → 退避 → 重连 → 重发
+      - 不可重试错误：立即返回 False
+      - 发送改用 `future.get(timeout=10)` 同步等待结果，确保捕获异常
+    - Consumer 消费循环增加连续异常计数（连续 5 次异常自动退出）+ 指数退避
+    - Consumer `_process()` 中 MySQL 写入失败不再崩溃（内部已有重试），仅 warning 日志
+  - **设计要点**：
+    1. **指数退避 vs 固定延迟**：指数退避（0.5→1→2→4→上限 5s）在快速恢复和避免雪崩之间取得平衡
+    2. **可重试错误码分类**：2002/2003（连接错误）、2006/2013（断连）、1205/1213（锁超时/死锁）适合重试；语法错误/约束冲突等应立即失败
+    3. **读写分离**：写操作重试时先重连再试（可能是连接过期）；读操作不重连（数据本身不存在不应重试）
+    4. **Kafka 同步等待**：从完全异步（`future.add_callback`）改为 `future.get(timeout=10)`，确保在重试循环中能感知发送失败
+- **状态**：✅ 完成
+
+## 步骤 49：语义缓存 — 相同/相似问题跳过 LLM
+- **时间**：2026-07-20
+- **原理**：
+  1. 用户问题 → DashScope embedding 向量（1536 维）
+  2. 与 Redis 中缓存的所有问题向量做**余弦相似度**比较
+  3. 相似度 ≥ 0.95 → 命中，直接返回缓存答案（跳过检索+LLM）
+  4. 相似度 < 0.95 → 未命中，正常 RAG → 缓存新 Q&A
+  - Redis 存储：`rag:cache:qa` → List\<JSON\> `{q, a, embedding, ts}`
+  - LRU 淘汰：超过 `max_entries`(100) 时从左侧丢弃旧条目
+  - TTL：默认 1 小时
+- **操作**：
+  - **config.yml / config.py** — 新增 `CacheConfig`（enabled/threshold/max_entries/ttl）
+  - **新增 `src/memory/qa_cache.py`** — 语义缓存核心：
+    - `lookup(question)` → 余弦相似度匹配，返回 `(hit, answer)`
+    - `store(question, answer)` → LRU + TTL 管理
+    - `_embed(text)` → 懒加载 EmbeddingClient
+    - `_cosine(a, b)` → 余弦相似度计算
+  - **rag_chain.py** — `ask()`/`ask_stream()` 在检索前调用 `_qa_cache.lookup()`，命中直接返回（`from_cache=True`）；回答后调用 `_qa_cache.store()`
+  - **api/ask.py** — `AskResponse` 新增 `from_cache: bool` 字段
+- **验证结果**：同一问题第 1 次 24014ms（LLM），第 2 次 2721ms（缓存命中），9x 加速，答案完全一致
+- **Bug 修复**：`store()` 用 key `"a"` 但 `lookup()` 读 `"answer"` → 字段名不匹配导致缓存永远不命中，已修正
+- **状态**：✅ 完成

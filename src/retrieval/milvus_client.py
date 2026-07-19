@@ -33,6 +33,7 @@ def _build_schema(dim: int) -> CollectionSchema:
         FieldSchema(name="embedding", dtype=DataType.FLOAT_VECTOR, dim=dim, description="稠密向量（语义）"),
         FieldSchema(name="sparse_embedding", dtype=DataType.SPARSE_FLOAT_VECTOR, description="稀疏向量（BM25 关键字）"),
         FieldSchema(name="ticket_id", dtype=DataType.VARCHAR, max_length=32, description="工单编号"),
+        FieldSchema(name="device_type", dtype=DataType.VARCHAR, max_length=64, description="设备类型（如CT机、MRI、血液透析机）"),
         FieldSchema(name="source", dtype=DataType.VARCHAR, max_length=512, description="来源文件"),
         FieldSchema(name="chunk_index", dtype=DataType.INT64, description="块序号"),
     ]
@@ -146,12 +147,14 @@ class MilvusStore:
         sources: list[str],
         chunk_indices: list[int],
         sparse_vectors: list[dict] = None,
+        device_types: list[str] = None,
     ) -> int:
         """
         批量写入向量 + 元数据。
 
         参数:
           sparse_vectors: 可选，BM25 稀疏向量列表 [{int(dim): float(val)}, ...]
+          device_types:   可选，设备类型列表
 
         返回: 插入的行数
         """
@@ -167,6 +170,7 @@ class MilvusStore:
                 "content": contents[i],
                 "embedding": vectors[i],
                 "ticket_id": ticket_ids[i],
+                "device_type": device_types[i] if device_types else "",
                 "source": sources[i],
                 "chunk_index": int(chunk_indices[i]),
             }
@@ -212,7 +216,7 @@ class MilvusStore:
             anns_field="embedding",
             limit=top_k,
             filter=expr or "",
-            output_fields=["content", "ticket_id", "source", "chunk_index"],
+            output_fields=["content", "ticket_id", "device_type", "source", "chunk_index"],
             search_params={"metric_type": self.metric_type, "params": self.search_params},
         )
 
@@ -226,6 +230,7 @@ class MilvusStore:
                     "score": hit["distance"],
                     "content": entity.get("content", ""),
                     "ticket_id": entity.get("ticket_id", ""),
+                    "device_type": entity.get("device_type", ""),
                     "source": entity.get("source", ""),
                     "chunk_index": entity.get("chunk_index", -1),
                 })
@@ -257,7 +262,7 @@ class MilvusStore:
             anns_field="sparse_embedding",
             limit=top_k,
             filter=expr or "",
-            output_fields=["content", "ticket_id", "source", "chunk_index"],
+            output_fields=["content", "ticket_id", "device_type", "source", "chunk_index"],
             search_params={"metric_type": "IP"},
         )
 
@@ -270,6 +275,7 @@ class MilvusStore:
                     "score": hit["distance"],
                     "content": entity.get("content", ""),
                     "ticket_id": entity.get("ticket_id", ""),
+                    "device_type": entity.get("device_type", ""),
                     "source": entity.get("source", ""),
                     "chunk_index": entity.get("chunk_index", -1),
                 })
@@ -329,7 +335,7 @@ class MilvusStore:
             reqs=[dense_req, sparse_req],
             ranker=ranker,
             limit=top_k,
-            output_fields=["content", "ticket_id", "source", "chunk_index"],
+            output_fields=["content", "ticket_id", "device_type", "source", "chunk_index"],
         )
 
         hits = []
@@ -341,6 +347,7 @@ class MilvusStore:
                     "score": hit["distance"],
                     "content": entity.get("content", ""),
                     "ticket_id": entity.get("ticket_id", ""),
+                    "device_type": entity.get("device_type", ""),
                     "source": entity.get("source", ""),
                     "chunk_index": entity.get("chunk_index", -1),
                 })

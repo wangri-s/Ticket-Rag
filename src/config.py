@@ -109,7 +109,27 @@ class LLMConfig:
         self.retrieval_top_k: int = data.get("retrieval_top_k", 5)
         self.system_prompt: str = data.get("system_prompt", "")
         self.rag_prompt_template: str = data.get("rag_prompt_template", "")
+        self.json_prompt_template: str = data.get("json_prompt_template", "")
         self.fallback_answer: str = data.get("fallback_answer", "抱歉，未找到相关记录。")
+        self.output_format: str = data.get("output_format", "text")
+
+
+class QueryPreprocessConfig:
+    def __init__(self, data: dict):
+        self.enabled: bool = data.get("enabled", False)
+        self.rewrite: bool = data.get("rewrite", True)
+        self.multi_query: bool = data.get("multi_query", False)
+        self.multi_query_n: int = data.get("multi_query_n", 3)
+
+
+class RerankConfig:
+    def __init__(self, data: dict):
+        self.enabled: bool = data.get("enabled", False)
+        self.model: str = data.get("model", "qwen3-rerank")
+        self.dashscope_api_key: str = data.get("dashscope_api_key", "")
+        self.oversample_factor: int = data.get("oversample_factor", 3)
+        self.max_retries: int = data.get("max_retries", 3)
+        self.timeout: int = data.get("timeout", 30)
 
 
 class RetrievalConfig:
@@ -121,6 +141,10 @@ class RetrievalConfig:
         hybrid = data.get("hybrid", {})
         self.hybrid_dense_weight: float = hybrid.get("dense_weight", 0.5)
         self.hybrid_sparse_weight: float = hybrid.get("sparse_weight", 0.5)
+        # 查询预处理
+        self.query_preprocess = QueryPreprocessConfig(data.get("query_preprocess", {}))
+        # 重排序
+        self.rerank = RerankConfig(data.get("rerank", {}))
 
 
 class ChunkingConfig:
@@ -130,6 +154,71 @@ class ChunkingConfig:
         self.chunk_overlap: int = data["chunk_overlap"]
         self.min_chunk_length: int = data["min_chunk_length"]
         self.separators: list[str] = data.get("separators", ["\n\n", "\n", "。", " "])
+
+
+class RedisConfig:
+    def __init__(self, data: dict):
+        self.host: str = data.get("host", "localhost")
+        self.port: int = int(data.get("port", 6379))
+        self.db: int = int(data.get("db", 0))
+        self.password: str = data.get("password", "") or None
+        self.ttl: int = int(data.get("ttl", 86400))
+        self.max_messages: int = int(data.get("max_messages", 20))
+        self.key_prefix: str = data.get("key_prefix", "rag:session")
+
+    @property
+    def uri(self) -> str:
+        auth = f":{self.password}@" if self.password else ""
+        return f"redis://{auth}{self.host}:{self.port}/{self.db}"
+
+
+class MySQLConfig:
+    def __init__(self, data: dict):
+        self.host: str = data.get("host", "localhost")
+        self.port: int = int(data.get("port", 3306))
+        self.user: str = data.get("user", "root")
+        self.password: str = data.get("password", "")
+        self.database: str = data.get("database", "rag_memory")
+        self.charset: str = data.get("charset", "utf8mb4")
+        self.pool_size: int = int(data.get("pool_size", 5))
+        self.max_retries: int = int(data.get("max_retries", 3))
+        self.retry_base_delay: float = float(data.get("retry_base_delay", 0.5))
+        self.retry_max_delay: float = float(data.get("retry_max_delay", 5.0))
+
+
+class KafkaConfig:
+    def __init__(self, data: dict):
+        self.bootstrap_servers: str = data.get("bootstrap_servers", "localhost:9092")
+        self.topic_messages: str = data.get("topic_messages", "rag.conversation.messages")
+        self.topic_summaries: str = data.get("topic_summaries", "rag.conversation.summaries")
+        self.consumer_group: str = data.get("consumer_group", "rag-memory-consumer")
+        self.max_retries: int = int(data.get("max_retries", 3))
+        self.retry_base_delay: float = float(data.get("retry_base_delay", 0.5))
+        self.retry_max_delay: float = float(data.get("retry_max_delay", 5.0))
+
+
+class SummaryConfig:
+    def __init__(self, data: dict):
+        self.enabled: bool = data.get("enabled", True)
+        self.trigger_turns: int = int(data.get("trigger_turns", 5))
+        self.model: str = data.get("model", "qwen-max")
+        self.max_summary_length: int = int(data.get("max_summary_length", 300))
+
+
+class CacheConfig:
+    def __init__(self, data: dict):
+        self.enabled: bool = data.get("enabled", True)
+        self.similarity_threshold: float = float(data.get("similarity_threshold", 0.95))
+        self.max_entries: int = int(data.get("max_entries", 100))
+        self.ttl: int = int(data.get("ttl", 3600))
+
+
+class MemoryConfig:
+    def __init__(self, data: dict):
+        self.redis = RedisConfig(data.get("redis", {}))
+        self.mysql = MySQLConfig(data.get("mysql", {}))
+        self.kafka = KafkaConfig(data.get("kafka", {}))
+        self.summary = SummaryConfig(data.get("summary", {}))
 
 
 class AppConfig:
@@ -143,7 +232,13 @@ class AppConfig:
         self.embedding = EmbeddingConfig(raw["embedding"])
         self.llm = LLMConfig(raw["llm"])
         self.retrieval = RetrievalConfig(raw["retrieval"])
+        self.rerank = self.retrieval.rerank  # 快捷访问
+        # Reranker 共用 LLM 的 API Key
+        if not self.rerank.dashscope_api_key:
+            self.rerank.dashscope_api_key = self.llm.dashscope_api_key
         self.chunking = ChunkingConfig(raw["chunking"])
+        self.memory = MemoryConfig(raw.get("memory", {}))
+        self.cache = CacheConfig(raw.get("cache", {}))
 
     def validate(self) -> list[str]:
         """校验必填配置项，返回缺失项列表"""

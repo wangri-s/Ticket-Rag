@@ -155,6 +155,7 @@ def build_knowledge_base(
 
     # 准备插入数据
     ticket_ids_list = [c.metadata.get("ticket_id", "__unknown__") for c in chunks]
+    device_types_list = [c.metadata.get("device_type", "") for c in chunks]
     sources_list = [c.metadata.get("source", "unknown") for c in chunks]
     chunk_indices_list = [c.metadata.get("chunk_index", i) for i, c in enumerate(chunks)]
 
@@ -166,6 +167,7 @@ def build_knowledge_base(
         sources=sources_list,
         chunk_indices=chunk_indices_list,
         sparse_vectors=sparse_vectors,
+        device_types=device_types_list,
     )
 
     elapsed = time.time() - t0

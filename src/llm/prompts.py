@@ -7,6 +7,8 @@
   - format_chunks(chunks)                → 将检索结果格式化为 Prompt 可读文本
 """
 
+from typing import Literal, Optional
+
 from src.config import get_config
 
 
@@ -83,6 +85,47 @@ def build_rag_prompt(
     return prompt
 
 
+def build_json_prompt(
+    question: str,
+    chunks: list[dict],
+    ticket_id_filter: str = None,
+) -> str:
+    """
+    构建 JSON 结构化输出的 Prompt：检索结果 + 用户问题 + JSON Schema 约束。
+
+    与 build_rag_prompt 相同，但使用 json_prompt_template 模板，
+    强制模型返回可解析的 JSON 对象，适合 API 集成场景。
+
+    参数:
+      question:         用户原始问题
+      chunks:           检索到的 chunk 列表
+      ticket_id_filter: 如果用户指定了工单号，可在此注明
+
+    返回:
+        可直接传给 LLM 的 user_message 字符串，或 None（无检索结果时）
+    """
+    cfg = get_config().llm
+
+    if not chunks:
+        return None
+
+    context = format_chunks(chunks)
+
+    filter_note = ""
+    if ticket_id_filter:
+        filter_note = f"\n（用户指定仅查询工单: {ticket_id_filter}）"
+
+    prompt = cfg.json_prompt_template.format(
+        context=context,
+        question=question + filter_note,
+    )
+
+    return prompt
+
+
+OutputFormat = Literal["text", "json"]
+
+
 # ── 获取 System Prompt ───────────────────────
 
 def get_system_prompt() -> str:
@@ -95,21 +138,53 @@ def get_fallback_answer() -> str:
     return get_config().llm.fallback_answer
 
 
+def get_json_fallback() -> str:
+    """返回无检索结果时的 JSON 兜底回答"""
+    import json
+    return json.dumps({
+        "question": "",
+        "has_reference": False,
+        "analysis": {
+            "symptom_breakdown": "",
+            "possible_causes": [],
+            "reasoning_chain": "知识库中未找到相关历史工单",
+        },
+        "references": [],
+        "recommendations": {
+            "steps": ["尝试用不同关键词描述故障现象", "联系设备厂家技术支持"],
+            "precautions": [],
+            "urgency": "medium",
+        },
+    }, ensure_ascii=False)
+
+
 # ── 快捷函数 ─────────────────────────────────
 
 def build_full_prompt(
     question: str,
     chunks: list[dict],
     ticket_id_filter: str = None,
-) -> tuple[str | None, str]:
+    output_format: OutputFormat = "text",
+) -> tuple[Optional[str], Optional[str]]:
     """
     一次性构建 system_prompt + user_message。
 
+    参数:
+      question:         用户问题
+      chunks:           检索到的 chunk 列表
+      ticket_id_filter: 按工单号过滤（可选）
+      output_format:    "text" → 自然语言（含 Few-shot + CoT）
+                        "json" → JSON Schema 约束输出
+
     返回: (system_prompt, user_message)
-      - 有检索结果: 返回 (medical_expert_prompt, rag_formatted_message)
-      - 无检索结果: 返回 (None, None)，调用方使用 get_fallback_answer()
+      - 有检索结果: 返回 (medical_expert_prompt, formatted_message)
+      - 无检索结果: 返回 (None, None)，调用方使用 fallback
     """
-    user_message = build_rag_prompt(question, chunks, ticket_id_filter)
+    if output_format == "json":
+        user_message = build_json_prompt(question, chunks, ticket_id_filter)
+    else:
+        user_message = build_rag_prompt(question, chunks, ticket_id_filter)
+
     if user_message is None:
         return None, None
 

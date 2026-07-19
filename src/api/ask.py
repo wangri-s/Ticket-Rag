@@ -48,6 +48,28 @@ class AskRequest(BaseModel):
         max_length=50,
         description="按工单号过滤（如 GD-2026-03001）",
     )
+    device_type: Optional[str] = Field(
+        default=None,
+        description="按设备类型过滤（如 CT 机、血液透析机、MRI 核磁共振）",
+    )
+    rerank: bool = Field(
+        default=False,
+        description="是否启用重排序（qwen3-rerank 交叉编码器精排）",
+    )
+    query_expansion: bool = Field(
+        default=False,
+        description="是否启用查询扩展（LLM 口语→关键词改写）",
+    )
+    output_format: str = Field(
+        default="text",
+        pattern=r"^(text|json)$",
+        description="输出格式: text=自然语言（含Few-shot+CoT）| json=JSON Schema结构化输出",
+    )
+    session_id: Optional[str] = Field(
+        default=None,
+        max_length=128,
+        description="会话 ID，传入则启用三级对话记忆（Redis+Kafka+MySQL）。不传则每次问答独立。",
+    )
 
 
 class SourceItem(BaseModel):
@@ -63,6 +85,9 @@ class AskResponse(BaseModel):
     sources: list[SourceItem]
     mode: str
     has_answer: bool
+    output_format: str = Field(default="text", description="输出格式")
+    session_id: Optional[str] = Field(default=None, description="会话 ID")
+    from_cache: bool = Field(default=False, description="是否来自语义缓存（跳过LLM）")
     latency_ms: float = Field(description="总耗时（毫秒）")
 
 
@@ -96,14 +121,22 @@ def rag_ask(req: AskRequest):
 
     result = chain.ask(
         question=req.question,
-        mode=req.mode,          # type: ignore
+        mode=req.mode,
         top_k=req.top_k,
         ticket_id_filter=req.ticket_id,
+        device_type_filter=req.device_type,
+        rerank=req.rerank,
+        query_expansion=req.query_expansion,
+        output_format=req.output_format,
+        session_id=req.session_id,
     )
 
     latency = (time.perf_counter() - t0) * 1000
-    logger.info(f"RAG ask: mode={req.mode} latency={latency:.0f}ms "
+    logger.info(f"RAG ask: mode={req.mode} fmt={req.output_format} "
+                f"session={req.session_id or 'none'} "
+                f"latency={latency:.0f}ms "
                 f"sources={len(result['sources'])} has_answer={result['has_answer']}")
+
 
     return AskResponse(
         question=result["question"],
@@ -111,6 +144,9 @@ def rag_ask(req: AskRequest):
         sources=[SourceItem(**s) for s in result["sources"]],
         mode=result["mode"],
         has_answer=result["has_answer"],
+        output_format=result.get("output_format", "text"),
+        session_id=result.get("session_id"),
+        from_cache=result.get("from_cache", False),
         latency_ms=round(latency, 1),
     )
 
@@ -135,9 +171,14 @@ def rag_ask_stream(req: AskRequest):
     # 先检索
     result = chain.ask(
         question=req.question,
-        mode=req.mode,          # type: ignore
+        mode=req.mode,
         top_k=req.top_k,
         ticket_id_filter=req.ticket_id,
+        device_type_filter=req.device_type,
+        rerank=req.rerank,
+        query_expansion=req.query_expansion,
+        output_format=req.output_format,
+        session_id=req.session_id,
     )
 
     async def event_stream():

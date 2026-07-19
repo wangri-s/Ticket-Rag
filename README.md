@@ -13,19 +13,27 @@
 | 能力 | 说明 |
 |------|------|
 | **语义检索** | 稠密向量（1536 维），理解同义词和上下文 |
-| **关键字检索** | BM25 稀疏向量 + 倒排索引，精确匹配术语和型号 |
+| **关键字检索** | BM25 稀疏向量 + jieba 医疗分词 + 倒排索引，精确匹配术语和型号 |
 | **混合检索** | 语义 + 关键字加权重排，互补盲区 |
+| **重排序** | qwen3-rerank 交叉编码器精排，初检多召回→重排→取 Top-K |
+| **查询扩展** | LLM 口语→关键词改写（"片子不清楚"→"CT 图像伪影 分辨率下降"） |
+| **元数据过滤** | 按设备类型（10 种）+ 工单号过滤，Milvus 标量索引加速 |
 | **RAG 生成** | 检索→Prompt 拼接→LLM 生成，回答带工单引用来源 |
 | **流式输出** | LLM 逐 token 返回，前端打字机效果 |
+| **提示词工程** | Few-shot 示例 + Chain-of-Thought 推理 + JSON Schema 结构化输出 |
+| **三级对话记忆** | Redis 短期 + Kafka 管道 + MySQL 长期 + LLM 中期摘要（每 5 轮） |
+| **语义缓存** | 相同/相似问题 embedding 余弦匹配，跳过 LLM（9x 加速） |
 | **安全兜底** | 医疗专家 System Prompt + 安全守则 + 无结果回退 |
+| **优雅降级** | Redis/Kafka/MySQL 任一不可用自动降级，不影响核心问答 |
 
 ### 技术栈
 
 ```
 检索:     Milvus 2.x (IVF_FLAT + SPARSE_INVERTED_INDEX)
 嵌入:     DashScope text-embedding-v1 (1536d)
-分词:     jieba + BM25 (milvus-model)
-LLM:      DashScope Qwen-Max
+分词:     jieba + 27 个医疗领域自定义术语
+LLM:      DashScope Qwen-Max + qwen3-rerank
+记忆:     Redis 7.x + Kafka + MySQL 8.0
 框架:     FastAPI + LangChain + pymilvus 3.0
 前端:     Streamlit（对话式 UI，流式输出）
 ```
@@ -63,19 +71,30 @@ LLM:      DashScope Qwen-Max
 │   │   └── sparse_embedder.py   #  稀疏向量（BM25 + jieba）
 │   │
 │   ├── retrieval/             # 检索引擎
-│   │   └── milvus_client.py   #   Milvus 操作封装（增删查 + 双路检索）
+│   │   ├── milvus_client.py   #   Milvus 操作封装（增删查 + 双路检索 + 标量过滤）
+│   │   ├── reranker.py        #   重排序（qwen3-rerank 交叉编码器）
+│   │   ├── query_processor.py #   查询预处理（口语→关键词改写）
+│   │   └── metadata_filter.py #   元数据过滤表达式构建器
+│   │
+│   ├── memory/                # 三级对话记忆
+│   │   ├── memory_manager.py  #   编排层（Redis + Kafka + MySQL + LLM摘要）
+│   │   ├── redis_client.py    #   短期记忆（List 存储，TTL 24h）
+│   │   ├── mysql_client.py    #   长期记忆（持久化 + 指数退避重试）
+│   │   ├── kafka_client.py    #   消息队列（Producer/Consumer + 重试）
+│   │   ├── summarizer.py      #   中期摘要（每 5 轮 LLM 压缩）
+│   │   └── qa_cache.py        #   语义缓存（embedding 余弦匹配）
 │   │
 │   ├── llm/                   # 大模型
 │   │   ├── llm_client.py      #   千问 API 封装（重试 + 退避 + 流式）
-│   │   ├── prompts.py         #   提示词管理（格式化 + 模板填充）
-│   │   └── rag_chain.py       #   RAG 核心链（检索→Prompt→生成 + 流式）
+│   │   ├── prompts.py         #   提示词管理（Few-shot + CoT + JSON Schema）
+│   │   └── rag_chain.py       #   RAG 核心链（检索→Prompt→生成 + 流式 + 记忆 + 缓存）
 │   │
 │   ├── api/                   # REST API
 │   │   ├── search.py          #   检索接口（semantic / keyword / hybrid）
 │   │   └── ask.py             #   RAG 问答接口（/api/ask + /api/ask/stream）
 │   │
 │   └── ui/                    # 前端
-│       └── app.py             #   Streamlit 对话式界面（流式打字机效果）
+│       └── app.py             #   Streamlit 对话式界面（流式 + 会话管理）
 │
 └── tests/                     # 测试
     ├── test_config.py
@@ -118,11 +137,17 @@ cp .env.example .env
 
 `config.yml` 包含全部应用参数，可按需调整检索模式、模型温度、Prompt 模板等。
 
-### 3. 启动 Milvus
+### 3. 启动 Milvus + Redis（可选）
 
 ```bash
+# 启动 Milvus
 docker compose -p rag-ticket up -d
+
+# 启动 Redis（对话记忆 + 语义缓存需要）
+docker run -d --name rag-redis -p 6379:6379 redis:7-alpine
 ```
+
+> MySQL 使用本地已有实例。Kafka 可选——不可用时自动降级为直接写 MySQL。
 
 验证服务状态：
 
@@ -216,9 +241,27 @@ POST /api/ask
 {
   "question": "CT扫描图像伪影是什么原因？",
   "mode": "hybrid",
-  "top_k": 3
+  "top_k": 5,
+  "ticket_id": null,
+  "device_type": "CT 机",
+  "rerank": false,
+  "query_expansion": false,
+  "output_format": "text",
+  "session_id": "my-session-001"
 }
 ```
+
+| 参数 | 类型 | 默认 | 说明 |
+|------|------|------|------|
+| `question` | str | 必填 | 用户问题（1-2000字符） |
+| `mode` | str | `hybrid` | 检索模式：`semantic` / `keyword` / `hybrid` |
+| `top_k` | int | 5 | 检索条数（1-20） |
+| `ticket_id` | str | null | 按工单号过滤（如 `GD-2026-03001`） |
+| `device_type` | str | null | 按设备类型过滤（10 种：CT 机、MRI 核磁共振等） |
+| `rerank` | bool | false | 启用 qwen3-rerank 交叉编码器重排序 |
+| `query_expansion` | bool | false | 启用 LLM 口语→关键词改写 |
+| `output_format` | str | `text` | `text`（Few-shot+CoT）/ `json`（JSON Schema） |
+| `session_id` | str | null | 会话 ID，传入则启用三级对话记忆 |
 
 响应：
 
@@ -236,40 +279,80 @@ POST /api/ask
   ],
   "mode": "hybrid",
   "has_answer": true,
+  "output_format": "text",
+  "session_id": "my-session-001",
+  "from_cache": false,
   "latency_ms": 2340.5
 }
 ```
+
+| 响应字段 | 类型 | 说明 |
+|----------|------|------|
+| `answer` | str | LLM 生成的回答（json 模式为 JSON 字符串） |
+| `sources` | list | 引用的工单来源 |
+| `has_answer` | bool | 是否找到相关工单 |
+| `output_format` | str | 实际输出格式 |
+| `session_id` | str\|null | 会话 ID |
+| `from_cache` | bool | 是否来自语义缓存（跳过 LLM） |
+| `latency_ms` | float | 总耗时（毫秒） |
 
 ---
 
 ## RAG 问答流程
 
 ```
-用户问题: "CT扫描图像伪影怎么排查？"
+用户问题: "CT扫描图像伪影怎么排查？"  (session_id="abc123")
+    │
+    ▼
+0a. 语义缓存查找
+     embedding(question) → Redis 余弦相似度 ≥0.95? → 命中 → 直接返回（跳过 LLM）
+    │
+    ▼
+0b. 查询预处理 (可选)
+     LLM 口语改写: "片子不清楚" → "CT 图像伪影 分辨率下降"
+    │
+    ▼
+0c. 注入对话记忆 (有 session_id 时)
+     Redis 读取最近 20 条消息 + 中期摘要 → 拼入 Prompt 的【对话背景】段
     │
     ▼
 ① 向量检索 (Milvus)
     ├─ 稠密向量 → IVF_FLAT → 语义匹配
     └─ 稀疏向量 → 倒排索引 → 关键字匹配
+    ├─ 标量过滤: device_type == "CT 机"  (可选)
     │
     ▼
-② 质量过滤
+② 重排序 (可选)
+    初检 top_k × 3 → qwen3-rerank 交叉编码器精排 → top_k
+    │
+    ▼
+③ 质量过滤
     丢弃 score < threshold 的低相关 chunk
     │
     ▼
-③ Prompt 构建
-    system: "你是医疗设备运维专家助手...（安全守则）"
-    user:   【参考工单】chunk1, chunk2... 【用户问题】CT伪影
+④ Prompt 构建
+    system: "你是医疗设备运维专家...（安全守则 + CoT 推理链）"
+    user:   【对话背景】... 【参考工单】... 【用户问题】... (含 Few-shot 示例)
     │
     ▼
-④ LLM 生成 (Qwen-Max)
+⑤ LLM 生成 (Qwen-Max)
     ├─ 流式模式: 逐 token 返回（打字机效果）
-    └─ 按格式输出: 故障分析 → 参考案例 → 处理步骤 → 注意事项
+    ├─ 格式: 故障分析 → 参考案例 → 处理步骤 → 注意事项
+    └─ 或: JSON Schema 结构化输出
     │
     ▼
-⑤ 返回
-    { "answer": "...", "sources": [{ticket_id, score, content}, ...] }
-```
+⑥ 记忆保存
+    ├─ Redis: LPUSH 消息（短期）
+    ├─ Kafka/MySQL: 持久化（长期）
+    └─ 每 5 轮: LLM 生成中期摘要
+    │
+    ▼
+⑦ 语义缓存
+    新 Q&A → Redis (embedding + answer)，下次相同问题 9x 加速
+    │
+    ▼
+⑧ 返回
+    { "answer": "...", "sources": [...], "from_cache": false, "session_id": "..." }
 
 ---
 
@@ -287,6 +370,49 @@ Streamlit 对话式 UI，支持：
 streamlit run src/ui/app.py
 # → http://localhost:8501
 ```
+
+---
+
+## 三级对话记忆
+
+```
+用户消息 → Redis (短期, 2ms) → Kafka/MySQL (长期, 异步)
+                                    ↑
+                        每 5 轮 → LLM 摘要 (中期)
+```
+
+| 层级 | 存储 | 容量 | 生命周期 | 用途 |
+|------|------|------|----------|------|
+| 短期 | Redis List | 20 条/会话 | TTL 24h | 实时对话上下文注入 Prompt |
+| 中期 | LLM 摘要 | 每 5 轮 1 条 | Redis TTL 24h + MySQL 永久 | 压缩历史，控制 token 消耗 |
+| 长期 | MySQL | 不限 | 永久 | 历史回溯、数据分析 |
+
+**使用方式**：API 传 `session_id` 即启用，不传即无记忆模式。
+
+**降级策略**：Redis 不可用 → 跳过短期记忆；Kafka 不可用 → 直接写 MySQL；MySQL 不可用 → 只保留 Redis。**任一故障不影响核心问答**。
+
+---
+
+## 语义缓存
+
+相同或高度相似的问题（余弦相似度 ≥ 0.95），直接返回缓存答案，跳过检索和 LLM 调用。
+
+```
+第 1 次: embedding("高压灭菌器灭菌程序中断...") → 缓存为空 → 完整 RAG → 存缓存 (~20s)
+第 2 次: embedding("高压灭菌器灭菌程序中断...") → 余弦相似度 1.00 → 命中！ → 直接返回 (~2s)
+```
+
+**加速比**：9x（2721ms vs 24014ms实测）
+
+---
+
+## 提示词工程
+
+| 技术 | 位置 | 效果 |
+|------|------|------|
+| **Few-shot** | `rag_prompt_template` 末尾 | 1 个完整标注示例，稳定输出格式 |
+| **Chain-of-Thought** | `system_prompt` 思维链章节 | 5 步推理框架（拆解→列举→对照→排除→形成） |
+| **JSON Schema** | `json_prompt_template` | `output_format=json` 时强制结构化输出，含 `urgency` 评估 |
 
 ---
 
@@ -317,16 +443,39 @@ pytest tests/ -v
 
 ```yaml
 # config.yml 关键配置项
+
 retrieval:
   default_mode: hybrid        # 默认检索模式
   hybrid:
-    dense_weight: 0.5         # 语义权重（0~1，越大越偏语义）
-    sparse_weight: 0.5        # 关键字权重（0~1，越大越偏精确匹配）
+    dense_weight: 0.5         # 语义权重（0~1）
+    sparse_weight: 0.5        # 关键字权重（0~1）
+  rerank:
+    enabled: false            # 启用 qwen3-rerank 重排序
+    oversample_factor: 3      # 初检倍数
+  query_preprocess:
+    enabled: false            # 启用 LLM 查询改写
 
 llm:
   model: qwen-max
-  temperature: 0.1            # 创造性（低=稳定，高=多样）
-  system_prompt: |            # 人设 + 安全守则
-  rag_prompt_template: |      # {context} + {question} 拼接模板
-  fallback_answer: "..."      # 无结果兜底回答
+  temperature: 0.1
+  output_format: text         # text | json
+  system_prompt: |            # 人设 + CoT 推理链 + 安全守则
+  rag_prompt_template: |      # {context} + {question} + Few-shot 示例
+  json_prompt_template: |     # JSON Schema 约束输出模板
+
+memory:
+  redis:                      # 短期记忆
+    ttl: 86400                # 24h 过期
+    max_messages: 20          # 每会话最多保留
+  mysql:                      # 长期记忆
+    max_retries: 3            # 指数退避重试
+  kafka:                      # 异步管道（不可用时直接写 MySQL）
+  summary:
+    trigger_turns: 5          # 每 5 轮生成中期摘要
+
+cache:
+  enabled: true               # 语义缓存
+  similarity_threshold: 0.95  # 余弦相似度阈值
+  max_entries: 100            # 最大缓存条目（LRU 淘汰）
+  ttl: 3600                   # 1 小时过期
 ```

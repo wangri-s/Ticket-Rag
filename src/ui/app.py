@@ -8,6 +8,7 @@ RAG 智能工单问答 — Streamlit 对话式前端（流式输出）
 
 import sys
 import time
+import uuid
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
@@ -75,6 +76,29 @@ def render_sidebar() -> dict:
         "检索条数", min_value=1, max_value=10, value=5, step=1,
     )
 
+    params["query_expansion"] = st.sidebar.checkbox(
+        "启用查询扩展 (Query Expansion)",
+        value=False,
+        help="LLM 将口语改写为专业关键词再检索。例如'片子不清楚'→'CT 图像伪影 分辨率下降'。增加约 0.5s 延迟。",
+    )
+
+    params["rerank"] = st.sidebar.checkbox(
+        "启用重排序 (Rerank)",
+        value=False,
+        help="初检多召回 → qwen3-rerank 交叉编码精排 → 取 Top-K。更精准，但增加约 0.5-1s 延迟。",
+    )
+
+    params["output_format"] = st.sidebar.selectbox(
+        "输出格式",
+        options=["text", "json"],
+        format_func=lambda x: {
+            "text": "📝 自然语言（Few-shot + CoT）",
+            "json": "🔧 JSON 结构化（API 场景）",
+        }[x],
+        index=0,
+        help="text: 含思维链推理和格式示例的自然语言回答。json: Schema 约束的 JSON 对象，适合下游系统解析。",
+    )
+
     _tid = st.sidebar.text_input(
         "按工单号过滤（可选）",
         value="",
@@ -82,9 +106,24 @@ def render_sidebar() -> dict:
     )
     params["ticket_id"] = _tid.strip() if _tid.strip() else None
 
+    from src.retrieval.metadata_filter import KNOWN_DEVICE_TYPES
+    _dtype = st.sidebar.selectbox(
+        "按设备类型过滤（可选）",
+        options=["(全部)"] + KNOWN_DEVICE_TYPES,
+        index=0,
+    )
+    params["device_type"] = _dtype if _dtype != "(全部)" else None
+
     if st.sidebar.button("🗑️ 清空对话", use_container_width=True):
         st.session_state.messages = []
+        # 生成新 session_id = 开启新会话记忆
+        st.session_state.session_id = uuid.uuid4().hex[:12]
         st.rerun()
+
+    # 会话记忆状态
+    sid = st.session_state.get("session_id", "")
+    if sid:
+        st.sidebar.caption(f"💾 会话记忆: `{sid[:8]}...` (每5轮自动摘要)")
 
     st.sidebar.divider()
 
@@ -159,6 +198,8 @@ def main():
         st.session_state.messages = []
     if "quick_input" not in st.session_state:
         st.session_state.quick_input = None
+    if "session_id" not in st.session_state:
+        st.session_state.session_id = uuid.uuid4().hex[:12]
 
     chain = init_chain()
     params = render_sidebar()
@@ -218,6 +259,11 @@ def main():
                 mode=params["mode"],
                 top_k=params["top_k"],
                 ticket_id_filter=params["ticket_id"],
+                device_type_filter=params.get("device_type"),
+                rerank=params.get("rerank", False),
+                query_expansion=params.get("query_expansion", False),
+                output_format=params.get("output_format", "text"),
+                session_id=st.session_state.get("session_id"),
             )
         except Exception as e:
             status_placeholder.empty()
@@ -252,6 +298,16 @@ def main():
 
             # 去掉光标
             answer_placeholder.markdown(full_answer)
+
+            # JSON 格式：额外显示格式化 JSON 块
+            if result.get("output_format") == "json":
+                import json as _json
+                try:
+                    parsed = _json.loads(full_answer)
+                    with st.expander("📋 JSON 结构化视图", expanded=True):
+                        st.json(parsed)
+                except _json.JSONDecodeError:
+                    st.caption("⚠️ LLM 返回的不是合法 JSON，已显示原始文本")
         except Exception as e:
             answer_placeholder.error(f"❌ 生成失败：{e}")
             full_answer = f"❌ 生成失败：{e}"

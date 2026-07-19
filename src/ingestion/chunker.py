@@ -18,11 +18,20 @@ from src.config import ChunkingConfig, get_config
 # 工单编号匹配: GD-YYYY-MMDDD
 RE_TICKET_ID = re.compile(r"GD-\d{4}-\d{5}")
 
+# 设备类型匹配: 【设备类型】xxx
+RE_DEVICE_TYPE = re.compile(r"【设备类型】(.+)")
+
 
 def extract_ticket_id(text: str) -> str | None:
     """从文本中提取工单编号，找不到返回 None"""
     m = RE_TICKET_ID.search(text)
     return m.group(0) if m else None
+
+
+def extract_device_type(text: str) -> str | None:
+    """从文本中提取设备类型，找不到返回 None"""
+    m = RE_DEVICE_TYPE.search(text)
+    return m.group(1).strip() if m else None
 
 
 class MedicalWorkOrderChunker:
@@ -79,6 +88,7 @@ class MedicalWorkOrderChunker:
 
         enriched: list[Document] = []
         last_ticket_id: str | None = None
+        last_device_type: str | None = None
 
         for i, doc in enumerate(split_docs):
             if len(doc.page_content) < self.min_chunk_length:
@@ -86,13 +96,21 @@ class MedicalWorkOrderChunker:
 
             doc.metadata["chunk_index"] = i
 
+            # 提取工单编号
             tid = extract_ticket_id(doc.page_content)
             if tid:
                 doc.metadata["ticket_id"] = tid
                 last_ticket_id = tid
             elif last_ticket_id:
-                # 当前块不包含工单编号 → 继承上一个块的编号
                 doc.metadata["ticket_id"] = last_ticket_id
+
+            # 提取设备类型
+            dtype = extract_device_type(doc.page_content)
+            if dtype:
+                doc.metadata["device_type"] = dtype
+                last_device_type = dtype
+            elif last_device_type:
+                doc.metadata["device_type"] = last_device_type
 
             enriched.append(doc)
 
