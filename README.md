@@ -23,8 +23,9 @@
 | **提示词工程** | Few-shot 示例 + Chain-of-Thought 推理 + JSON Schema 结构化输出 |
 | **三级对话记忆** | Redis 短期 + Kafka 管道 + MySQL 长期 + LLM 中期摘要（每 5 轮） |
 | **语义缓存** | 相同/相似问题 embedding 余弦匹配，跳过 LLM（9x 加速） |
+| **限流配额** | 全局限流 + 用户限流（Token Bucket）+ LLM 成本控制（Sliding Window） |
 | **安全兜底** | 医疗专家 System Prompt + 安全守则 + 无结果回退 |
-| **优雅降级** | Redis/Kafka/MySQL 任一不可用自动降级，不影响核心问答 |
+| **优雅降级** | Redis/Kafka/MySQL/限流 任一不可用自动降级，不影响核心问答 |
 
 ### 技术栈
 
@@ -34,8 +35,9 @@
 分词:     jieba + 27 个医疗领域自定义术语
 LLM:      DashScope Qwen-Max + qwen3-rerank
 记忆:     Redis 7.x + Kafka + MySQL 8.0
+限流:     Token Bucket + Sliding Window（Redis Lua + 内存兜底）
 框架:     FastAPI + LangChain + pymilvus 3.0
-前端:     Streamlit（对话式 UI，流式输出）
+前端:     Streamlit（对话式 UI，流式输出 + 欢迎引导页）
 ```
 
 ---
@@ -93,8 +95,11 @@ LLM:      DashScope Qwen-Max + qwen3-rerank
 │   │   ├── search.py          #   检索接口（semantic / keyword / hybrid）
 │   │   └── ask.py             #   RAG 问答接口（/api/ask + /api/ask/stream）
 │   │
+│   ├── utils/                  # 工具
+│   │   └── rate_limiter.py     #   限流配额（Token Bucket + Sliding Window + LLM成本）
+│   │
 │   └── ui/                    # 前端
-│       └── app.py             #   Streamlit 对话式界面（流式 + 会话管理）
+│       └── app.py             #   Streamlit 对话界面（欢迎页 + 流式 + 状态指示器）
 │
 └── tests/                     # 测试
     ├── test_config.py
@@ -137,17 +142,20 @@ cp .env.example .env
 
 `config.yml` 包含全部应用参数，可按需调整检索模式、模型温度、Prompt 模板等。
 
-### 3. 启动 Milvus + Redis（可选）
+### 3. 启动基础设施
 
 ```bash
-# 启动 Milvus
-docker compose -p rag-ticket up -d
+# Milvus（向量数据库，必需）
+docker compose -p rag up -d etcd minio milvus-standalone
 
-# 启动 Redis（对话记忆 + 语义缓存需要）
-docker run -d --name rag-redis -p 6379:6379 redis:7-alpine
+# Redis（对话记忆 + 语义缓存 + 分布式限流）
+docker run -d --name redis-rag -p 6379:6379 redis:7-alpine
+
+# Zookeeper + Kafka（异步记忆管道，可选）
+docker start zookeeper kafka
 ```
 
-> MySQL 使用本地已有实例。Kafka 可选——不可用时自动降级为直接写 MySQL。
+> Redis/Kafka 不可用时自动降级，不影响核心问答。
 
 验证服务状态：
 
@@ -304,11 +312,15 @@ POST /api/ask
 用户问题: "CT扫描图像伪影怎么排查？"  (session_id="abc123")
     │
     ▼
-0a. 语义缓存查找
+0a. 限流检查
+     全局限流 (Token Bucket) → 用户限流 (Token Bucket) → LLM 预算 (Sliding Window)
+    │
+    ▼
+0b. 语义缓存查找
      embedding(question) → Redis 余弦相似度 ≥0.95? → 命中 → 直接返回（跳过 LLM）
     │
     ▼
-0b. 查询预处理 (可选)
+0c. 查询预处理 (可选)
      LLM 口语改写: "片子不清楚" → "CT 图像伪影 分辨率下降"
     │
     ▼
@@ -360,11 +372,13 @@ POST /api/ask
 
 Streamlit 对话式 UI，支持：
 
-- 🎨 **类 ChatGPT 对话风格**：双气泡，消息历史累积
-- ⚡ **流式打字机效果**：LLM 逐 token 输出，实时渲染
-- 🔍 **三种检索模式切换**：侧边栏下拉
-- 📚 **引用来源可视化**：分数进度条 + 工单号 + 来源文件
-- 💡 **快捷测试问题**：侧边栏一键发送
+- 🏠 **欢迎引导页**：首次打开展示能力卡片 + 快捷问题网格，降低使用门槛
+- 💬 **对话式交互**：消息历史累积，流式打字机效果 + 闪烁光标
+- 🔵🟡🟢 **三阶段状态指示器**：蓝色检索中 → 黄色生成中 → 绿色缓存命中，CSS 脉冲动画
+- 🏷️ **元信息标签栏**：彩色圆角标签（命中/缓存/模式/延迟分级着色）
+- 📚 **来源卡片**：工单编号 + 分数颜色渐变 + 可视进度条 + 内容预览
+- ⚙️ **侧边栏分层**：基本设置 / 高级选项 / 过滤条件 三组折叠
+- 🔄 **新建会话**：一键切换 session_id，不丢失历史
 
 ```bash
 streamlit run src/ui/app.py
@@ -403,6 +417,30 @@ streamlit run src/ui/app.py
 ```
 
 **加速比**：9x（2721ms vs 24014ms实测）
+
+---
+
+## 限流与配额管理
+
+三层防护架构，防止 API 滥用和 LLM 费用失控：
+
+```
+请求 → 全局限流 (Token Bucket) → 用户限流 (Token Bucket) → LLM 预算 (Sliding Window) → 放行
+                ↓ 超限                  ↓ 超限                   ↓ 超限
+              429 + Retry-After      429 + Retry-After       429 + 预算提示
+```
+
+| 层级 | 算法 | 默认值 | 后端 |
+|------|------|--------|------|
+| 全局限流 | Token Bucket | 60 req/min, burst=15 | Redis Lua → 内存兜底 |
+| 用户限流 | Token Bucket | 20 req/min, burst=5 | Redis Lua → 内存兜底 |
+| LLM 成本 | Sliding Window | 100K tokens/h, 50 次/h | Redis Sorted Set |
+
+**用户识别**：`X-API-Key` > `X-User-ID` > `session_id` > 客户端 IP
+
+**响应头**：每次请求返回 `X-RateLimit-Limit/Remaining/Reset`，超限时附带 `Retry-After`
+
+**容错**：Redis 不可用时自动退回进程内存模式，成本上报失败不影响主流程
 
 ---
 
@@ -478,4 +516,14 @@ cache:
   similarity_threshold: 0.95  # 余弦相似度阈值
   max_entries: 100            # 最大缓存条目（LRU 淘汰）
   ttl: 3600                   # 1 小时过期
+
+rate_limit:
+  enabled: true               # 限流总开关
+  global_rpm: 60              # 全局每分钟最大请求数
+  global_burst: 15            # 全局突发容量
+  user_rpm: 20                # 单用户每分钟最大请求数
+  user_burst: 5               # 单用户突发容量
+  llm_max_tokens_per_hour: 100000   # 单用户每小时 LLM 最大 token
+  llm_max_requests_per_hour: 50     # 单用户每小时最大 LLM 调用次数
+  redis_enabled: true         # Redis 分布式后端开关
 ```
