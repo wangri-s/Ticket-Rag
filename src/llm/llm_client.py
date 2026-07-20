@@ -151,13 +151,33 @@ class LLMClient:
         if not output or not output.text:
             raise RuntimeError("LLM 返回了空文本")
 
+        usage = resp.usage
         logger.info(
-            f"LLM 调用成功: input={resp.usage.get('input_tokens', '?')} "
-            f"output={resp.usage.get('output_tokens', '?')} "
-            f"total={resp.usage.get('total_tokens', '?')} tokens"
+            f"LLM 调用成功: input={usage.get('input_tokens', '?')} "
+            f"output={usage.get('output_tokens', '?')} "
+            f"total={usage.get('total_tokens', '?')} tokens"
         )
 
+        # ── 上报 token 用量到成本追踪器 ──
+        self._report_cost(usage)
+
         return output.text
+
+    def _report_cost(self, usage) -> None:
+        """上报本次 LLM 调用的 token 消耗到全局 CostTracker"""
+        try:
+            from src.utils.rate_limiter import get_cost_tracker, get_current_user
+            user_id = get_current_user()
+            if user_id:
+                input_tokens = (usage.get("input_tokens") or 0) if isinstance(usage, dict) else 0
+                output_tokens = (usage.get("output_tokens") or 0) if isinstance(usage, dict) else 0
+                get_cost_tracker().record_usage(
+                    user_id,
+                    input_tokens=int(input_tokens),
+                    output_tokens=int(output_tokens),
+                )
+        except Exception:
+            pass  # 成本上报失败不影响主流程
 
     def _call_stream(self, messages: list[dict]):
         """流式 API 调用，逐 token yield 文本增量"""

@@ -213,6 +213,23 @@ class CacheConfig:
         self.ttl: int = int(data.get("ttl", 3600))
 
 
+class RateLimitConfig:
+    def __init__(self, data: dict):
+        self.enabled: bool = data.get("enabled", True)
+        # 全局限流
+        self.global_rpm: int = int(data.get("global_rpm", 60))
+        self.global_burst: int = int(data.get("global_burst", 15))
+        # 用户级限流
+        self.user_rpm: int = int(data.get("user_rpm", 20))
+        self.user_burst: int = int(data.get("user_burst", 5))
+        # LLM 成本
+        self.cost_enabled: bool = self.enabled
+        self.llm_max_tokens_per_hour: int = int(data.get("llm_max_tokens_per_hour", 100000))
+        self.llm_max_requests_per_hour: int = int(data.get("llm_max_requests_per_hour", 50))
+        # Redis 后端
+        self.redis_enabled: bool = data.get("redis_enabled", True)
+
+
 class MemoryConfig:
     def __init__(self, data: dict):
         self.redis = RedisConfig(data.get("redis", {}))
@@ -239,6 +256,7 @@ class AppConfig:
         self.chunking = ChunkingConfig(raw["chunking"])
         self.memory = MemoryConfig(raw.get("memory", {}))
         self.cache = CacheConfig(raw.get("cache", {}))
+        self.rate_limit = RateLimitConfig(raw.get("rate_limit", {}))
 
     def validate(self) -> list[str]:
         """校验必填配置项，返回缺失项列表"""

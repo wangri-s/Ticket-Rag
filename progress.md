@@ -695,3 +695,121 @@
 - **验证结果**：同一问题第 1 次 24014ms（LLM），第 2 次 2721ms（缓存命中），9x 加速，答案完全一致
 - **Bug 修复**：`store()` 用 key `"a"` 但 `lookup()` 读 `"answer"` → 字段名不匹配导致缓存永远不命中，已修正
 - **状态**：✅ 完成
+
+---
+
+## 步骤 50：限流与配额管理（Token Bucket + LLM 成本追踪）
+- **时间**：2026-07-20
+- **背景**：
+  - 系统对外暴露 API 后存在以下风险：
+    1. 无 QPS 限制 —— 恶意/意外高频调用可打垮服务，LLM API 费用不可控
+    2. 无用户维度隔离 —— 所有请求一视同仁，无法区分高/低优先级用户
+    3. 无 LLM 预算管控 —— 单用户可以无限调用 LLM，费用无上限
+- **方案**：三层限流架构
+
+  **① 全局限流 — Token Bucket (Redis Lua + 内存兜底)**
+  - 算法：Token Bucket（capacity=burst, refill_rate=rpm/60）
+  - Redis 模式：Lua 脚本保证 `HGET → refill → 判断 → HMSET` 原子性，适合多进程部署
+  - 内存模式：`threading.Lock` + time-based refill，Redis 不可用时自动降级
+  - 默认：60 req/min，burst=15
+
+  **② 用户级限流 — 同算法，独立桶**
+  - 用户标识提取优先级：`X-API-Key` > `X-User-ID` > `session_id` > 客户端 IP
+  - 默认：20 req/min，burst=5
+  - 每个用户独立 Token Bucket，互不影响
+
+  **③ LLM 成本控制 — Sliding Window (Redis Sorted Set)**
+  - 按小时窗口统计每用户的 token 消耗 + 请求次数
+  - 两维度预算：max_tokens_per_hour（默认 100K）+ max_requests_per_hour（默认 50）
+  - `ZADD` 记录每次 LLM 调用 → `ZREMRANGEBYSCORE` 清理过期数据 → 超限抛 `BudgetExceeded`
+
+  **④ 用户 ID 传播 — contextvars**
+  - 问题：API 层知道 user_id，LLMClient 需要 user_id 上报成本，但不想改函数签名
+  - 方案：`contextvars.ContextVar` 在 API 入口 `set_current_user()`，LLMClient 内部 `get_current_user()`
+  - 优势：不侵入 RAGChain → LLMClient → prompts 的调用链，协程安全
+
+- **操作**：
+  - **config.yml** — 新增 `rate_limit` 配置节：
+    ```yaml
+    rate_limit:
+      enabled: true
+      global_rpm: 60         # 全局 QPS ≈ 1
+      global_burst: 15       # 允许短时突发
+      user_rpm: 20           # 单用户 QPS
+      user_burst: 5
+      llm_max_tokens_per_hour: 100000
+      llm_max_requests_per_hour: 50
+      redis_enabled: true    # 分布式后端开关
+    ```
+  - **config.py** — 新增 `RateLimitConfig` 数据类
+  - **新增 `src/utils/rate_limiter.py`** — 限流核心（~430 行）：
+    - `InMemoryTokenBucket` — `threading.Lock` + time-based refill
+    - `RedisTokenBucket` — Lua 脚本原子 Token Bucket
+    - `RateLimiter` — 统一接口，Redis→内存自动 fallback，`check_global()` + `check_user()`
+    - `CostTracker` — Redis Sorted Set 滑动窗口，`check_budget()` + `record_usage()`
+    - `get_user_id(request)` — 用户标识提取（API-Key > User-ID > session > IP）
+    - `set_current_user()` / `get_current_user()` — contextvars 传播
+  - **main.py** — 注册异常处理：
+    - `RateLimitExceeded` → 429 + `Retry-After` + `X-RateLimit-*` 头
+    - `BudgetExceeded` → 429 + `Retry-After`
+  - **api/ask.py** — `rag_ask` / `rag_ask_stream` 注入限流检查：
+    - 提取 user_id → 全局限流 → 用户限流 → LLM 预算检查 → `set_current_user()`
+    - 响应携带 `X-RateLimit-*` 头（Limit/Remaining/Reset，全局+用户各一套）
+  - **llm_client.py** — `_call_api()` 成功后调用 `_report_cost()`，自动上报 token 用量
+- **验证结果**：
+  - 所有 32 个已有测试通过，无回归
+  - 内存模式限流验证：burst=15 → 前 15 次放行，第 16 次触发 `RateLimitExceeded`
+  - Redis 不可用时自动打印一条 Warning，退回内存模式
+  - 成本上报失败不影响主流程（全 try-catch）
+- **状态**：✅ 完成
+
+---
+
+## 步骤 51：Streamlit 前端界面重构优化
+- **时间**：2026-07-21
+- **背景**：
+  - 旧版前端仅有基础 CSS 微调，体验接近"开发原型"
+  - 缺乏欢迎引导页，新用户不知道从何下手
+  - 检索/生成状态提示简陋（纯文本 caption）
+  - 元信息和来源卡片排版粗糙，信息密度低
+  - 侧边栏控件杂乱堆叠，缺乏分组层次
+- **方案**：全面重构 Streamlit UI，保持功能完整，提升视觉品质
+
+  **① 欢迎引导页**
+  - 空会话时展示欢迎页：标题 + 能力卡片（4 列网格：混合检索/CoT 推理/会话记忆/语义缓存）
+  - 8 个快捷问题以按钮网格布局（2 行 × 4 列），替代侧边栏的垂直按钮列表
+  - 减少首次使用的认知负担
+
+  **② 状态指示器**
+  - 三阶段视觉反馈：
+    - 检索中 → 蓝色脉冲动画 + `status-pulse` CSS
+    - 生成中 → 黄色脉冲动画
+    - 缓存命中 → 绿色常亮
+  - 用 CSS `@keyframes pulse` 实现呼吸灯效果
+
+  **③ 元信息标签栏**
+  - 彩色圆角标签（pill badge）展示关键指标：
+    - 命中/未命中/缓存命中（绿/红/蓝）
+    - 检索模式（灰）
+    - 延迟自动分级：绿 <1s / 黄 1-3s / 红 >3s
+  - CSS `flex-wrap` 自适应换行
+
+  **④ 来源卡片重构**
+  - 卡片式设计：工单编号 + 分数（颜色渐变） + 进度条 + 文本块（最大高度限制） + 来源文件
+  - 来源 ≤3 条默认展开，>3 条默认折叠
+
+  **⑤ 侧边栏分层**
+  - 三组 Expander：基本设置（始终展开）/ 高级选项 / 过滤条件
+  - 新增"新建会话"按钮
+  - 系统状态新增限流状态展示
+
+  **⑥ CSS 设计系统**
+  - CSS 变量（颜色/圆角/阴影）、动画（pulse/blink）、hover 效果、响应式
+
+- **操作**：
+  - 重写 `src/ui/app.py`
+  - 新增组件函数：`render_welcome()`、`render_source_card()`、`render_meta_tags()`、`_latency_class()`、`_score_color()`
+  - 状态指示器：蓝/黄/绿三阶段
+  - 历史消息新增 `from_cache` 和 `output_format` 字段
+- **验证**：语法检查通过，32 个已有测试全部通过
+- **状态**：✅ 完成

@@ -21,6 +21,7 @@ from fastapi.responses import JSONResponse
 
 from src.api.search import router as search_router
 from src.api.ask import router as ask_router
+from src.utils.rate_limiter import RateLimitExceeded, BudgetExceeded
 
 # ── 日志 ──────────────────────────────────────
 
@@ -109,6 +110,41 @@ async def global_exception_handler(request: Request, exc: Exception):
             "message": "服务器内部错误，请稍后重试",
             "detail": str(exc) if app.debug else None,
         },
+    )
+
+
+# ── 限流 & 预算异常处理 ─────────────────────
+
+@app.exception_handler(RateLimitExceeded)
+async def rate_limit_handler(request: Request, exc: RateLimitExceeded):
+    """全局限流 / 用户限流 → 429"""
+    return JSONResponse(
+        status_code=429,
+        content={
+            "error": "rate_limit_exceeded",
+            "message": str(exc),
+            "retry_after_seconds": round(exc.retry_after, 1),
+            "limit": exc.limit,
+        },
+        headers={
+            "Retry-After": str(int(exc.retry_after + 0.999)),
+            "X-RateLimit-Limit": str(exc.limit),
+            "X-RateLimit-Remaining": "0",
+        },
+    )
+
+
+@app.exception_handler(BudgetExceeded)
+async def budget_handler(request: Request, exc: BudgetExceeded):
+    """LLM 预算超限 → 429"""
+    return JSONResponse(
+        status_code=429,
+        content={
+            "error": "llm_budget_exceeded",
+            "message": str(exc),
+            "retry_after_seconds": round(exc.retry_after, 1),
+        },
+        headers={"Retry-After": str(int(exc.retry_after + 0.999))},
     )
 
 

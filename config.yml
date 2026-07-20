@@ -290,3 +290,25 @@ cache:
   similarity_threshold: 0.95     # 余弦相似度阈值（0~1），超过视为相同问题
   max_entries: 100               # 最多缓存 100 条 Q&A（LRU 淘汰）
   ttl: 3600                      # 缓存过期时间（秒），默认 1 小时
+
+# ============================================================
+# 限流与配额管理 — Token Bucket + LLM 成本追踪
+# ============================================================
+
+rate_limit:
+  enabled: true                  # 总开关，false 则所有限流放行
+
+  # ---------- 全局限流 ----------
+  global_rpm: 60                 # 全局每分钟最大请求数（所有用户合计）
+  global_burst: 15               # 全局突发容量（token bucket 最大 token 数）
+
+  # ---------- 用户级限流 ----------
+  user_rpm: 20                   # 单用户每分钟最大请求数
+  user_burst: 5                  # 单用户突发容量
+
+  # ---------- LLM 成本控制 ----------
+  llm_max_tokens_per_hour: 100000      # 单用户每小时最大 LLM token 消耗（输入+输出）
+  llm_max_requests_per_hour: 50        # 单用户每小时最大 LLM 调用次数
+
+  # ---------- Redis 分布式后端 ----------
+  redis_enabled: true            # true=Redis 分布式；false=进程内存模式

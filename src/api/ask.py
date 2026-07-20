@@ -10,12 +10,20 @@ import logging
 import time
 from typing import Optional
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from src.llm.rag_chain import RAGChain
 from src.config import get_config
+from src.utils.rate_limiter import (
+    RateLimitExceeded,
+    BudgetExceeded,
+    get_rate_limiter,
+    get_cost_tracker,
+    get_user_id,
+    set_current_user,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -108,7 +116,7 @@ def _get_chain() -> RAGChain:
 # ── 端点 ─────────────────────────────────────
 
 @router.post("/ask", response_model=AskResponse)
-def rag_ask(req: AskRequest):
+def rag_ask(req: AskRequest, request: Request):
     """
     RAG 问答（检索 + LLM 生成）。
 
@@ -117,6 +125,19 @@ def rag_ask(req: AskRequest):
     无相关结果时返回兜底回答（has_answer=false, sources=[]）。
     """
     t0 = time.perf_counter()
+
+    # ── 限流 + 预算检查 ──
+    user_id = get_user_id(request, req.session_id)
+    limiter = get_rate_limiter()
+    limiter.check_global()
+    limiter.check_user(user_id)
+
+    tracker = get_cost_tracker()
+    tracker.check_budget(user_id)
+
+    # 设置当前用户 ID，供 LLMClient 上报 token 用量
+    set_current_user(user_id)
+
     chain = _get_chain()
 
     result = chain.ask(
@@ -134,11 +155,13 @@ def rag_ask(req: AskRequest):
     latency = (time.perf_counter() - t0) * 1000
     logger.info(f"RAG ask: mode={req.mode} fmt={req.output_format} "
                 f"session={req.session_id or 'none'} "
+                f"user={user_id[:24]}... "
                 f"latency={latency:.0f}ms "
-                f"sources={len(result['sources'])} has_answer={result['has_answer']}")
+                f"sources={len(result['sources'])} has_answer={result['has_answer']} "
+                f"cache={result.get('from_cache', False)}")
 
-
-    return AskResponse(
+    # 构建响应 + 注入限流头
+    resp = AskResponse(
         question=result["question"],
         answer=result["answer"],
         sources=[SourceItem(**s) for s in result["sources"]],
@@ -150,9 +173,18 @@ def rag_ask(req: AskRequest):
         latency_ms=round(latency, 1),
     )
 
+    # 注入限流响应头
+    from fastapi.encoders import jsonable_encoder
+    from fastapi.responses import JSONResponse
+    headers = dict(limiter.rate_limit_headers)
+    return JSONResponse(
+        content=jsonable_encoder(resp),
+        headers=headers,
+    )
+
 
 @router.post("/ask/stream")
-def rag_ask_stream(req: AskRequest):
+def rag_ask_stream(req: AskRequest, request: Request):
     """
     RAG 问答 — SSE 流式输出。
 
@@ -166,6 +198,17 @@ def rag_ask_stream(req: AskRequest):
         -H "Content-Type: application/json" \
         -d '{"question":"CT伪影怎么处理？","mode":"hybrid","top_k":3}'
     """
+    # ── 限流 + 预算检查（在 stream 之前） ──
+    user_id = get_user_id(request, req.session_id)
+    limiter = get_rate_limiter()
+    limiter.check_global()
+    limiter.check_user(user_id)
+
+    tracker = get_cost_tracker()
+    tracker.check_budget(user_id)
+
+    set_current_user(user_id)
+
     chain = _get_chain()
 
     # 先检索
