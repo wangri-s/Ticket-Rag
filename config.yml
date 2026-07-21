@@ -312,3 +312,15 @@ rate_limit:
 
   # ---------- Redis 分布式后端 ----------
   redis_enabled: true            # true=Redis 分布式；false=进程内存模式
+
+# ============================================================
+# 上下文压缩 — 防止 Prompt 超 LLM context window
+# ============================================================
+
+context_compression:
+  enabled: true                  # 是否启用上下文压缩
+  max_context_tokens: 6000       # Prompt 最大 token 数（含 system + question + chunks + memory）
+  llm_response_reserve_tokens: 1500   # 预留给 LLM 输出的 token 空间
+  max_chunk_chars: 300           # Level 2 压缩时每个 chunk 最大字符数
+  dedup_threshold: 0.7           # Level 3 去重: Jaccard 相似度阈值
+  llm_summarize_enabled: true    # Level 4: 是否允许 LLM 压缩上下文（额外 1 次 LLM 调用）

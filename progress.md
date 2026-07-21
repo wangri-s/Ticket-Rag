@@ -813,3 +813,55 @@
   - 历史消息新增 `from_cache` 和 `output_format` 字段
 - **验证**：语法检查通过，32 个已有测试全部通过
 - **状态**：✅ 完成
+
+---
+
+## 步骤 52：上下文压缩 — 防止 Prompt 超 context window
+- **时间**：2026-07-21
+- **背景**：
+  - RAG 检索可能返回大量 chunk（top_k=10），加上 System Prompt（~500 tokens）、Few-shot 示例（~400 tokens）、对话记忆（~500 tokens），总 token 数可能超出 LLM 的 context window
+  - Qwen-Max context window 8K tokens（部分场景 32K），超限时 API 截断输入或报错
+  - 需要一个透明、低侵入的压缩机制，在 Prompt 构建前自动裁剪上下文
+- **方案**：多级上下文压缩策略
+
+  **压缩策略（按优先级递进，成本从低到高）:**
+
+  ```
+  Level 1: Score truncation     — 按相关性分数从低到高丢弃 chunk（零额外成本）
+  Level 2: Content truncation   — 每个 chunk 截断到 max_chunk_chars（零额外成本）
+  Level 3: Deduplication        — Jaccard 相似度合并重叠 chunk（零额外成本）
+  Level 4: LLM summarization    — 用 LLM 将多段压缩为精简摘要（最后手段，+1 LLM 调用）
+  Fallback: Aggressive truncate — 每 chunk 150 字符 + 只取前 3 个（极端兜底）
+  ```
+
+  **Token 估算方法:**
+  - `chars / 1.2 = tokens` —— 保守估计（低估 chars_per_token → 高估 token 数 → 宁可多截）
+  - 每个 chunk 额外计 40 chars 格式化开销（"─── 工单 N ───\n编号: ..."）
+
+  **去重算法:**
+  - 基于 3-gram Jaccard 相似度
+  - 相邻 chunk 重叠度 >0.7 时，保留分数更高的那条
+  - 工单场景常见"故障现象相同但处理方案不同"的 chunk，Jaccard 能识别但不误杀
+
+- **操作**：
+  - **新增 `src/utils/context_compressor.py`**（~230 行）：
+    - `estimate_tokens(text)` — 保守 token 估算
+    - `_deduplicate_chunks()` — 3-gram Jaccard 去重
+    - `ContextCompressor.compress(chunks, system_prompt, question, memory_context)` — 四级压缩
+  - **config.yml** — 新增 `context_compression` 配置节：
+    ```yaml
+    context_compression:
+      enabled: true
+      max_context_tokens: 6000          # Prompt 最大 token 数
+      llm_response_reserve_tokens: 1500 # 预留 LLM 输出空间
+      max_chunk_chars: 300              # Level 2 单 chunk 最大字符
+      dedup_threshold: 0.7              # Level 3 Jaccard 阈值
+      llm_summarize_enabled: true       # Level 4 LLM 压缩开关
+    ```
+  - **config.py** — 新增 `ContextCompressionConfig`
+  - **rag_chain.py** — `ask()`/`ask_stream()` 在 score 过滤后、Prompt 构建前调用压缩器
+- **验证结果**：
+  - 语法检查通过，12 个 config 测试通过
+  - 20 小 chunk → 无需压缩（76 tokens，<6000 预算）
+  - 15 大 chunk（4920 chars）→ L1 丢弃 1 条 + L2 截断到 328 chars → 14 条保留
+- **状态**：✅ 完成

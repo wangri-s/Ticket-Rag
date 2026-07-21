@@ -230,6 +230,16 @@ class RateLimitConfig:
         self.redis_enabled: bool = data.get("redis_enabled", True)
 
 
+class ContextCompressionConfig:
+    def __init__(self, data: dict):
+        self.enabled: bool = data.get("enabled", True)
+        self.max_context_tokens: int = int(data.get("max_context_tokens", 6000))
+        self.llm_response_reserve_tokens: int = int(data.get("llm_response_reserve_tokens", 1500))
+        self.max_chunk_chars: int = int(data.get("max_chunk_chars", 300))
+        self.dedup_threshold: float = float(data.get("dedup_threshold", 0.7))
+        self.llm_summarize_enabled: bool = data.get("llm_summarize_enabled", True)
+
+
 class MemoryConfig:
     def __init__(self, data: dict):
         self.redis = RedisConfig(data.get("redis", {}))
@@ -257,6 +267,7 @@ class AppConfig:
         self.memory = MemoryConfig(raw.get("memory", {}))
         self.cache = CacheConfig(raw.get("cache", {}))
         self.rate_limit = RateLimitConfig(raw.get("rate_limit", {}))
+        self.context_compression = ContextCompressionConfig(raw.get("context_compression", {}))
 
     def validate(self) -> list[str]:
         """校验必填配置项，返回缺失项列表"""

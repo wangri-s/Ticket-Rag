@@ -22,13 +22,14 @@ from src.embedding.sparse_embedder import BM25SparseEmbedder
 from src.ingestion.loader import DocumentLoader
 from src.ingestion.chunker import MedicalWorkOrderChunker
 from src.llm.llm_client import LLMClient
-from src.llm.prompts import build_full_prompt, get_fallback_answer, get_json_fallback
+from src.llm.prompts import build_full_prompt, get_fallback_answer, get_json_fallback, get_system_prompt
 from src.retrieval.milvus_client import MilvusStore
 from src.retrieval.metadata_filter import build_filter_expr
 from src.retrieval.query_processor import QueryProcessor
 from src.retrieval.reranker import Reranker
 from src.memory.memory_manager import MemoryManager
 from src.memory.qa_cache import QACache
+from src.utils.context_compressor import ContextCompressor
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +86,11 @@ def _get_qa_cache() -> QACache:
     return QACache()
 
 
+@lru_cache(maxsize=1)
+def _get_compressor() -> ContextCompressor:
+    return ContextCompressor()
+
+
 # ── RAG Chain ─────────────────────────────────
 
 class RAGChain:
@@ -107,6 +113,7 @@ class RAGChain:
         self._llm = _get_llm()
         self._memory = _get_memory()
         self._qa_cache = _get_qa_cache()
+        self._compressor = _get_compressor()
         self._cfg = get_config()
 
     # ── 主入口 ──────────────────────────────
@@ -199,6 +206,17 @@ class RAGChain:
         # 4. 按分数阈值过滤低相关结果
         score_threshold = self._cfg.retrieval.score_threshold
         chunks = [c for c in chunks if c.get("score", 0.0) >= score_threshold]
+
+        # 4a. 上下文压缩 — 确保 prompt 不超过 context window
+        if chunks and self._cfg.context_compression.enabled:
+            # 提前获取记忆上下文（压缩时需要估算其 token 数）
+            memory_context = ""
+            if session_id:
+                memory_context = self._memory.build_memory_prompt(session_id)
+            system_prompt = get_system_prompt()
+            chunks = self._compressor.compress(
+                chunks, system_prompt, question, memory_context,
+            )
 
         # 5. 构建 Prompt（用原始问题而非改写后的查询）
         system_prompt, user_message = build_full_prompt(
@@ -349,6 +367,15 @@ class RAGChain:
 
         score_threshold = self._cfg.retrieval.score_threshold
         chunks = [c for c in chunks if c.get("score", 0.0) >= score_threshold]
+
+        # 上下文压缩
+        if chunks and self._cfg.context_compression.enabled:
+            mem_ctx = ""
+            if session_id:
+                mem_ctx = self._memory.build_memory_prompt(session_id)
+            chunks = self._compressor.compress(
+                chunks, get_system_prompt(), question, mem_ctx,
+            )
 
         system_prompt, user_message = build_full_prompt(
             question, chunks, ticket_id_filter, output_format=output_format,
