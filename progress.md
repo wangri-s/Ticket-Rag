@@ -865,3 +865,29 @@
   - 20 小 chunk → 无需压缩（76 tokens，<6000 预算）
   - 15 大 chunk（4920 chars）→ L1 丢弃 1 条 + L2 截断到 328 chars → 14 条保留
 - **状态**：✅ 完成
+
+## 步骤 53：全面功能测试体系
+- **时间**：2026-07-21
+- **背景**：
+  - 原有仅 4 个测试文件（config/loader/chunker/pipeline），覆盖不到 30% 模块
+  - 新增模块（限流、压缩、记忆、缓存、API）无任何自动化测试
+  - 需要一套完整的单元测试 + Mock 集成测试体系
+- **方案**：10 个新测试文件 + 共享 fixtures 基础设施
+- **操作**：
+  - **新增 `tests/conftest.py`** — 共享 fixtures（sample_chunks, mock_redis, mock_llm_client, mock_milvus_store, mock_memory_manager 等）
+  - **新增 `tests/test_metadata_filter.py`** (15 用例) — 标量过滤表达式构建 + 已知设备类型
+  - **新增 `tests/test_prompts.py`** (17 用例) — Prompt 构建/格式化/兜底/JSON Schema
+  - **新增 `tests/test_context_compressor.py`** (20 用例) — Token 估算/四级压缩/去重/fallback/边界
+  - **新增 `tests/test_rate_limiter.py`** (20 用例) — Token Bucket/并发安全/用户ID提取/CostTracker/异常
+  - **新增 `tests/test_redis_memory.py`** (16 用例) — Redis 消息存取/LTRIM/TTL/JSON损坏降级/key前缀
+  - **新增 `tests/test_qa_cache.py`** (19 用例) — Cosine相似度/缓存命中漏检/损坏条目/LRU淘汰/禁用降级
+  - **新增 `tests/test_memory_manager.py`** (16 用例) — 三级编排/Kafka→MySQL降级/摘要触发/build_memory_prompt
+  - **新增 `tests/test_llm_client.py`** (8 用例) — DashScope调用/重试机制/流式/成本上报/Mock响应格式
+  - **新增 `tests/test_rag_chain.py`** (11 用例) — 全链路Mock/三模式检索/缓存命中/分数过滤/session记忆
+  - **新增 `tests/test_api.py`** (21 用例) — FastAPI TestClient/校验/SSE流式/429限流/health检查
+  - **新增 `docs/test_plan.md`** — 完整功能测试文档（10章：测试金字塔/Mock矩阵/E2E清单/CI建议）
+- **测试规模**：
+  - **221 passed**（14 个测试文件，免外部依赖全通过）
+  - 覆盖 16 个源码模块，从配置→摄入→检索→LLM→记忆→缓存→限流→压缩→API 全链路
+  - Mock 策略：Redis/Embedding/LLM/Milvus/Kafka/MySQL 全部 Mock，纯 Python 运行无需 Docker
+- **状态**：✅ 完成
